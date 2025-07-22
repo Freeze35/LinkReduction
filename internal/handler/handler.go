@@ -20,6 +20,6 @@ func (h *Handler) InitRoutes(app *fiber.App) {
 
 func (h *Handler) createShorLink(c *fiber.Ctx) error {
 	return c.Status(http.StatusCreated).JSON(fiber.Map{
-		"message": "New chat created",
+		"message": "Hi response",
 	})
 }

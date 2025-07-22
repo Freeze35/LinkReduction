@@ -24,6 +24,9 @@ COPY --from=builder /app/linkreduction .
 # Копируем .env если нужен
 COPY .env .env
 
+# Копирование миграций
+COPY ./migrations ./migrations
+
 # Открываем порт (замени на нужный, например 8080)
 EXPOSE 8080
 

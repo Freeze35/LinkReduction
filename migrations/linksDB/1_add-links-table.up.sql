@@ -1,0 +1,5 @@
+CREATE TABLE IF NOT EXISTS links
+(
+    id   SERIAL PRIMARY KEY,
+    link VARCHAR(200)  NOT NULL
+);
