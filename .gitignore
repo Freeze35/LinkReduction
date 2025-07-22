@@ -1,0 +1,39 @@
+# Go build artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Go workspace and build directories
+bin/
+build/
+dist/
+
+# Local Go modules cache
+vendor/
+
+# GoLand / Goland IDE
+.idea/
+
+# VS Code
+.vscode/
+
+# MacOS
+.DS_Store
+
+# Env files (credentials etc.)
+.env
+.env.*
+
+# Logs and debug output
+*.log
+
+# Docker
+*.tar
+docker-compose.override.yml
+
+# Binary names (add your output name if custom)
+linkreduction
