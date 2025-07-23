@@ -3,13 +3,13 @@ services:
 
   # Link Reduction - Основное приложение
   app:
-    container_name: link-reduction-app  # Удобное имя контейнера
+    container_name: link-reduction-app
     build:
       context: .                        # Контекст сборки — корень проекта
       dockerfile: Dockerfile            # Путь к Dockerfile основного приложения
     ports:
       - "8080:8080"                     # Пробрасываем порт: хост:контейнер
-      # В контейнере приложение слушает 8080 (или другой, если задан в .env)
+
     restart: always                     # Перезапуск при сбое
     env_file:
       - .env                            # Загружаем переменные окружения из .env файла

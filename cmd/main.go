@@ -1,18 +1,17 @@
 package main
 
 import (
+	"database/sql"
 	"github.com/gofiber/fiber/v2"
 	"github.com/joho/godotenv"
 	"linkreduction/internal/handler"
 	"linkreduction/migrations"
+	"linkreduction/utils"
 	"log"
 	"os"
 	"os/signal"
 	"syscall"
 )
-
-//TIP <p>To run your code, right-click the code and select <b>Run</b>.</p> <p>Alternatively, click
-// the <icon src="AllIcons.Actions.Execute"/> icon in the gutter and select the <b>Run</b> menu item from here.</p>
 
 func main() {
 	// Загружаем переменные из файла .env
@@ -20,13 +19,31 @@ func main() {
 		log.Fatalf("Ошибка загрузки .env файла: %v", err)
 	}
 
+	// Получаем строку подключения к базе данных
+	dbURL := utils.DsnString(os.Getenv("DBNAME"))
+	if dbURL == "" {
+		log.Fatalf("Переменная окружения DATABASE_URL не задана")
+	}
+
 	// Выполняем миграции
 	migrations.RunMigrations()
 
+	// Инициализация обработчика
+	h, err := handler.NewHandler(dbURL)
+	if err != nil {
+		log.Fatalf("Ошибка инициализации обработчика: %v", err)
+	}
+	defer func(Db *sql.DB) {
+		err := Db.Close()
+		if err != nil {
+			log.Fatalf("Внутреняя ошибка закрытия базы данных:%v", err)
+		}
+	}(h.Db)
+
+	// Настройка Fiber
 	app := fiber.New()
 
 	// Инициализация маршрутов
-	h := handler.NewHandler()
 	h.InitRoutes(app)
 
 	// Канал для сигналов завершения
