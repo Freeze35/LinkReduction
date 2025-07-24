@@ -1,7 +1,4 @@
-global:
-  scrape_interval: 15s
-
 scrape_configs:
-  - job_name: 'go_app'
+  - job_name: 'linkreduction'
     static_configs:
       - targets: ['app:8080']

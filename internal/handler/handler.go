@@ -8,8 +8,11 @@ import (
 	"fmt"
 	"github.com/IBM/sarama"
 	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/adaptor"
 	_ "github.com/lib/pq"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
+	initprometheus "linkreduction/internal/prometheus"
 	"log"
 	"net/http"
 	"net/url"
@@ -18,21 +21,15 @@ import (
 	"time"
 )
 
-// InitRoutes настраивает маршруты
-func (h *Handler) InitRoutes(app *fiber.App) {
-	app.Post("/createShortLink", h.createShortLink)
-	app.Get("/:key", h.redirect)
-	go h.consumeShortenURLs()
-}
-
 // BaseURL - базовый домен для коротких ссылок
 var BaseURL = os.Getenv("BASE_URL")
 
-// Handler - структура для хранения подключения к базе данных, Redis и Kafka
+// Handler - структура для хранения подключения к базе данных, Redis, Kafka и метрик Prometheus
 type Handler struct {
 	Db       *sql.DB
 	redis    *redis.Client
 	producer sarama.SyncProducer
+	metrics  *initprometheus.PrometheusMetrics
 }
 
 // ShortenRequest - структура для парсинга JSON-запроса
@@ -106,6 +103,7 @@ func NewHandler(dbURL string) (*Handler, error) {
 		Db:       db,
 		redis:    redisClient,
 		producer: producer,
+		metrics:  initprometheus.InitPrometheus(), // Инициализация метрик для prometheus
 	}, nil
 }
 
@@ -185,6 +183,7 @@ func (h *Handler) shortenURL(originalURL string) (string, error) {
 
 // createShortLink обрабатывает POST-запрос для создания короткой ссылки
 func (h *Handler) createShortLink(c *fiber.Ctx) error {
+	start := time.Now()
 	log.Printf("Получен POST-запрос на /createShortLink")
 	log.Printf("Тело запроса: %s", c.Body())
 	log.Printf("Заголовки запроса: %v", c.GetReqHeaders())
@@ -194,6 +193,8 @@ func (h *Handler) createShortLink(c *fiber.Ctx) error {
 		var req ShortenRequest
 		if err := c.BodyParser(&req); err != nil {
 			log.Printf("Ошибка парсинга JSON: %v", err)
+			h.metrics.CreateShortLinkTotal.WithLabelValues("error").Inc()
+			h.metrics.CreateShortLinkLatency.WithLabelValues("error").Observe(time.Since(start).Seconds())
 			return c.Status(http.StatusBadRequest).JSON(fiber.Map{
 				"error": fmt.Sprintf("некорректное тело JSON: %v", err),
 			})
@@ -204,6 +205,8 @@ func (h *Handler) createShortLink(c *fiber.Ctx) error {
 	}
 
 	if originalURL == "" {
+		h.metrics.CreateShortLinkTotal.WithLabelValues("error").Inc()
+		h.metrics.CreateShortLinkLatency.WithLabelValues("error").Observe(time.Since(start).Seconds())
 		return c.Status(http.StatusBadRequest).JSON(fiber.Map{
 			"error": "URL обязателен",
 		})
@@ -211,6 +214,8 @@ func (h *Handler) createShortLink(c *fiber.Ctx) error {
 
 	shortLink, err := h.shortenURL(originalURL)
 	if err != nil {
+		h.metrics.CreateShortLinkTotal.WithLabelValues("error").Inc()
+		h.metrics.CreateShortLinkLatency.WithLabelValues("error").Observe(time.Since(start).Seconds())
 		return c.Status(http.StatusBadRequest).JSON(fiber.Map{
 			"error": err.Error(),
 		})
@@ -221,6 +226,8 @@ func (h *Handler) createShortLink(c *fiber.Ctx) error {
 	messageBytes, err := json.Marshal(message)
 	if err != nil {
 		log.Printf("Ошибка сериализации сообщения Kafka: %v", err)
+		h.metrics.CreateShortLinkTotal.WithLabelValues("error").Inc()
+		h.metrics.CreateShortLinkLatency.WithLabelValues("error").Observe(time.Since(start).Seconds())
 		return c.Status(http.StatusInternalServerError).JSON(fiber.Map{
 			"error": fmt.Sprintf("ошибка сериализации: %v", err),
 		})
@@ -232,12 +239,16 @@ func (h *Handler) createShortLink(c *fiber.Ctx) error {
 	})
 	if err != nil {
 		log.Printf("Ошибка отправки в Kafka: %v", err)
+		h.metrics.CreateShortLinkTotal.WithLabelValues("error").Inc()
+		h.metrics.CreateShortLinkLatency.WithLabelValues("error").Observe(time.Since(start).Seconds())
 		return c.Status(http.StatusInternalServerError).JSON(fiber.Map{
 			"error": fmt.Sprintf("ошибка отправки в Kafka: %v", err),
 		})
 	}
 	log.Printf("Отправлено в Kafka: %s -> %s", originalURL, shortLink)
 
+	h.metrics.CreateShortLinkTotal.WithLabelValues("success").Inc()
+	h.metrics.CreateShortLinkLatency.WithLabelValues("success").Observe(time.Since(start).Seconds())
 	return c.Status(http.StatusCreated).JSON(fiber.Map{
 		"message":  "Короткая ссылка создана",
 		"shortURL": shortURL,
@@ -293,6 +304,7 @@ func (h *Handler) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama
 		var shortenMsg ShortenMessage
 		if err := json.Unmarshal(message.Value, &shortenMsg); err != nil {
 			log.Printf("Ошибка десериализации сообщения Kafka: %v", err)
+			h.metrics.DbInsertTotal.WithLabelValues("error").Inc()
 			continue
 		}
 
@@ -300,10 +312,12 @@ func (h *Handler) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama
 		result, err := h.Db.Exec("INSERT INTO links (link, short_link) VALUES ($1, $2) ON CONFLICT (link) DO NOTHING", shortenMsg.OriginalURL, shortenMsg.ShortLink)
 		if err != nil {
 			log.Printf("Ошибка сохранения в базу данных: %v", err)
+			h.metrics.DbInsertTotal.WithLabelValues("error").Inc()
 			continue
 		}
 		rowsAffected, _ := result.RowsAffected()
 		log.Printf("Вставлено в БД: %d строк, link=%s, short_link=%s", rowsAffected, shortenMsg.OriginalURL, shortenMsg.ShortLink)
+		h.metrics.DbInsertTotal.WithLabelValues("success").Inc()
 
 		cacheKey := "shorten:" + shortenMsg.OriginalURL
 		if err := h.redis.Set(ctx, cacheKey, shortenMsg.ShortLink, 10*time.Minute).Err(); err != nil {
@@ -324,6 +338,7 @@ func (h *Handler) redirect(c *fiber.Ctx) error {
 	cacheKey := "redirect:" + shortLink
 	if cachedURL, err := h.redis.Get(ctx, cacheKey).Result(); err == nil {
 		log.Printf("Найдено в кэше (redirect): %s -> %s", shortLink, cachedURL)
+		h.metrics.RedirectTotal.WithLabelValues("success").Inc()
 		return c.Redirect(cachedURL, http.StatusMovedPermanently)
 	} else if err != redis.Nil {
 		log.Printf("Ошибка чтения из Redis (redirect): %v", err)
@@ -332,11 +347,13 @@ func (h *Handler) redirect(c *fiber.Ctx) error {
 	var originalURL string
 	err := h.Db.QueryRow("SELECT link FROM links WHERE short_link = $1", shortLink).Scan(&originalURL)
 	if err == sql.ErrNoRows {
+		h.metrics.RedirectTotal.WithLabelValues("not_found").Inc()
 		return c.Status(http.StatusNotFound).JSON(fiber.Map{
 			"error": "Короткая ссылка не найдена",
 		})
 	}
 	if err != nil {
+		h.metrics.RedirectTotal.WithLabelValues("error").Inc()
 		return c.Status(http.StatusInternalServerError).JSON(fiber.Map{
 			"error": fmt.Sprintf("Ошибка базы данных: %v", err),
 		})
@@ -348,5 +365,14 @@ func (h *Handler) redirect(c *fiber.Ctx) error {
 		log.Printf("Закэшировано (redirect): %s -> %s с TTL 10 минут", shortLink, originalURL)
 	}
 
+	h.metrics.RedirectTotal.WithLabelValues("success").Inc()
 	return c.Redirect(originalURL, http.StatusMovedPermanently)
+}
+
+// InitRoutes настраивает маршруты
+func (h *Handler) InitRoutes(app *fiber.App) {
+	app.Get("/metrics", adaptor.HTTPHandler(promhttp.Handler())) // Переместить выше
+	app.Post("/createShortLink", h.createShortLink)
+	app.Get("/:key", h.redirect) // Динамический маршрут ниже
+	go h.consumeShortenURLs()
 }

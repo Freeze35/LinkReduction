@@ -47,11 +47,13 @@ services:
 
   # 📈 Prometheus — система сбора и мониторинга метрик
   prometheus:
-    image: prom/prometheus:latest
-    ports:
-      - "9090:9090"                   # Web-интерфейс Prometheus
-    volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro  # Подключаем кастомную конфигурацию
+      image: prom/prometheus:latest
+      ports:
+        - "9090:9090"
+      volumes:
+        - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      networks:
+        - lr-network
 
   # 🟡 Kafka (режим KRaft, без Zookeeper) — брокер сообщений
   kafka:
