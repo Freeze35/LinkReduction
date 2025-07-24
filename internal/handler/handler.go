@@ -21,6 +21,14 @@ import (
 	"time"
 )
 
+// InitRoutes настраивает маршруты
+func (h *Handler) InitRoutes(app *fiber.App) {
+	app.Get("/metrics", adaptor.HTTPHandler(promhttp.Handler())) // Переместить выше
+	app.Post("/createShortLink", h.createShortLink)
+	app.Get("/:key", h.redirect) // Динамический маршрут ниже
+	go h.consumeShortenURLs()
+}
+
 // BaseURL - базовый домен для коротких ссылок
 var BaseURL = os.Getenv("BASE_URL")
 
@@ -367,12 +375,4 @@ func (h *Handler) redirect(c *fiber.Ctx) error {
 
 	h.metrics.RedirectTotal.WithLabelValues("success").Inc()
 	return c.Redirect(originalURL, http.StatusMovedPermanently)
-}
-
-// InitRoutes настраивает маршруты
-func (h *Handler) InitRoutes(app *fiber.App) {
-	app.Get("/metrics", adaptor.HTTPHandler(promhttp.Handler())) // Переместить выше
-	app.Post("/createShortLink", h.createShortLink)
-	app.Get("/:key", h.redirect) // Динамический маршрут ниже
-	go h.consumeShortenURLs()
 }
