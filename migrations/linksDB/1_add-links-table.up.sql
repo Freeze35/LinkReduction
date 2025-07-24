@@ -1,7 +1,7 @@
 CREATE TABLE IF NOT EXISTS links
 (
-    id   SERIAL PRIMARY KEY,
-    link       TEXT NOT NULL,
+    id         SERIAL PRIMARY KEY,
+    link       TEXT UNIQUE NOT NULL,
     short_link VARCHAR(10) UNIQUE NOT NULL,
     created_at TIMESTAMP NOT NULL DEFAULT NOW()
-);
+    );

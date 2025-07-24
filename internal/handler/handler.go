@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/md5"
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"github.com/IBM/sarama"
 	"github.com/gofiber/fiber/v2"
 	_ "github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
@@ -16,19 +18,21 @@ import (
 	"time"
 )
 
-// InitRoutes настраивает маршруты для приложения Fiber
+// InitRoutes настраивает маршруты
 func (h *Handler) InitRoutes(app *fiber.App) {
 	app.Post("/createShortLink", h.createShortLink)
 	app.Get("/:key", h.redirect)
+	go h.consumeShortenURLs()
 }
 
-// BaseURL - базовый домен для коротких ссылок (задаётся через переменную окружения)
+// BaseURL - базовый домен для коротких ссылок
 var BaseURL = os.Getenv("BASE_URL")
 
-// Handler - структура для хранения подключения к базе данных и Redis
+// Handler - структура для хранения подключения к базе данных, Redis и Kafka
 type Handler struct {
-	Db    *sql.DB
-	redis *redis.Client
+	Db       *sql.DB
+	redis    *redis.Client
+	producer sarama.SyncProducer
 }
 
 // ShortenRequest - структура для парсинга JSON-запроса
@@ -36,21 +40,24 @@ type ShortenRequest struct {
 	URL string `json:"url"`
 }
 
-// NewHandler создаёт новый экземпляр Handler и открывает соединение с PostgreSQL и Redis
+// ShortenMessage - структура для сообщений Kafka
+type ShortenMessage struct {
+	OriginalURL string `json:"original_url"`
+	ShortLink   string `json:"short_link"`
+}
+
+// NewHandler создаёт новый экземпляр Handler
 func NewHandler(dbURL string) (*Handler, error) {
 	// Подключение к PostgreSQL
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
 		return nil, fmt.Errorf("ошибка открытия базы данных: %v", err)
 	}
-
-	// Проверка доступности базы данных
-	err = db.Ping()
-	if err != nil {
+	if err = db.Ping(); err != nil {
 		return nil, fmt.Errorf("база данных недоступна: %v", err)
 	}
 
-	// Проверка, что BaseURL задан
+	// Проверка BaseURL
 	if BaseURL == "" {
 		return nil, fmt.Errorf("BaseURL пуст")
 	}
@@ -61,85 +68,108 @@ func NewHandler(dbURL string) (*Handler, error) {
 		return nil, fmt.Errorf("REDIS_URL пуст")
 	}
 	log.Printf("Подключение к Redis: %s", redisURL)
-	redisClient := redis.NewClient(&redis.Options{
-		Addr: redisURL,
-	})
-	// Проверка доступности Redis
+	redisClient := redis.NewClient(&redis.Options{Addr: redisURL})
 	ctx := context.Background()
-	_, err = redisClient.Ping(ctx).Result()
-	if err != nil {
+	if _, err = redisClient.Ping(ctx).Result(); err != nil {
 		return nil, fmt.Errorf("Redis недоступен: %v", err)
 	}
 	log.Printf("Redis успешно подключён")
 
+	// Подключение к Kafka
+	kafkaBrokers := strings.Split(os.Getenv("KAFKA_BROKERS"), ",")
+	log.Printf("KAFKA_BROKERS value: %v", os.Getenv("KAFKA_BROKERS"))
+	if len(kafkaBrokers) == 0 || kafkaBrokers[0] == "" {
+		return nil, fmt.Errorf("KAFKA_BROKERS пуст")
+	}
+	log.Printf("Подключение к Kafka: %v", kafkaBrokers)
+	config := sarama.NewConfig()
+	config.Producer.Return.Successes = true
+	config.Producer.RequiredAcks = sarama.WaitForAll
+	config.Producer.Retry.Max = 5
+	config.Producer.Retry.Backoff = 100 * time.Millisecond
+
+	var producer sarama.SyncProducer
+	for i := 0; i < 10; i++ {
+		producer, err = sarama.NewSyncProducer(kafkaBrokers, config)
+		if err == nil {
+			break
+		}
+		log.Printf("Попытка %d: ошибка подключения к Kafka: %v", i+1, err)
+		time.Sleep(2 * time.Second)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("ошибка подключения к Kafka после 10 попыток: %v", err)
+	}
+	log.Printf("Kafka успешно подключён")
+
 	return &Handler{
-		Db:    db,
-		redis: redisClient,
+		Db:       db,
+		redis:    redisClient,
+		producer: producer,
 	}, nil
 }
 
-// generateShortLink генерирует короткий ключ фиксированной длины (6 символов) на основе URL
+// Close закрывает соединения
+func (h *Handler) Close() {
+	if h.Db != nil {
+		h.Db.Close()
+	}
+	if h.redis != nil {
+		h.redis.Close()
+	}
+	if h.producer != nil {
+		h.producer.Close()
+	}
+}
+
+// generateShortLink генерирует короткий ключ (6 символов)
 func generateShortLink(originalURL string) string {
-	// Используем MD5 хэш от URL для генерации ключа
 	hash := md5.Sum([]byte(originalURL))
-	// Берём первые 6 символов хэша в hex-формате
 	return fmt.Sprintf("%x", hash)[:6]
 }
 
-// shortenURL проверяет входной URL, ищет его в кэше, БД или создаёт новую короткую ссылку
+// shortenURL проверяет URL, ищет в кэше/БД или генерирует новый ключ
 func (h *Handler) shortenURL(originalURL string) (string, error) {
-	// Проверка, начинается ли URL с http:// или https://
 	if !strings.HasPrefix(originalURL, "http://") && !strings.HasPrefix(originalURL, "https://") {
 		return "", fmt.Errorf("некорректный URL: должен начинаться с http:// или https://")
 	}
-
-	// Парсинг и валидация URL
 	parsedURL, err := url.Parse(originalURL)
 	if err != nil || parsedURL.Scheme == "" || parsedURL.Host == "" {
 		return "", fmt.Errorf("некорректный формат URL")
 	}
 
-	// Проверка в Redis
 	ctx := context.Background()
 	cacheKey := "shorten:" + originalURL
-	if cachedURL, err := h.redis.Get(ctx, cacheKey).Result(); err == nil {
-		log.Printf("Найдено в кэше (shorten): %s -> %s", originalURL, cachedURL)
-		return cachedURL, nil
+	if cachedShortLink, err := h.redis.Get(ctx, cacheKey).Result(); err == nil {
+		log.Printf("Найдено в кэше (shorten): %s -> %s", originalURL, cachedShortLink)
+		return cachedShortLink, nil
 	} else if err != redis.Nil {
 		log.Printf("Ошибка чтения из Redis (shorten): %v", err)
 	}
 
-	// Проверка, существует ли URL в базе данных
 	var shortLink string
 	err = h.Db.QueryRow("SELECT short_link FROM links WHERE link = $1", originalURL).Scan(&shortLink)
 	if err == nil {
-		// URL уже существует, кэшируем и возвращаем
-		shortURL := fmt.Sprintf("%s/%s", BaseURL, shortLink)
-		if err := h.redis.Set(ctx, cacheKey, shortURL, 10*time.Minute).Err(); err != nil {
+		if err := h.redis.Set(ctx, cacheKey, shortLink, 10*time.Minute).Err(); err != nil {
 			log.Printf("Ошибка записи в Redis (shorten): %v", err)
 		} else {
-			log.Printf("Закэшировано (shorten): %s -> %s с TTL 10 минут", originalURL, shortURL)
+			log.Printf("Закэшировано (shorten): %s -> %s с TTL 10 минут", originalURL, shortLink)
 		}
-		return shortURL, nil
+		return shortLink, nil
 	}
 	if err != sql.ErrNoRows {
 		return "", fmt.Errorf("ошибка проверки URL в базе данных: %v", err)
 	}
 
-	// Попытки генерации уникального ключа
 	for i := 0; i < 3; i++ {
-		// Генерация нового короткого ключа с суффиксом
 		inputURL := originalURL
 		if i > 0 {
 			inputURL = fmt.Sprintf("%s_%d", originalURL, i)
 		}
 		shortLink = generateShortLink(inputURL)
-
-		// Проверка, существует ли ключ в базе данных
 		var exists string
 		err = h.Db.QueryRow("SELECT short_link FROM links WHERE short_link = $1", shortLink).Scan(&exists)
 		if err == sql.ErrNoRows {
-			// Ключ уникален, можно использовать
 			break
 		}
 		if err != nil {
@@ -150,33 +180,16 @@ func (h *Handler) shortenURL(originalURL string) (string, error) {
 		}
 	}
 
-	// Сохранение в базу данных
-	_, err = h.Db.Exec("INSERT INTO links (link, short_link) VALUES ($1, $2)", originalURL, shortLink)
-	if err != nil {
-		return "", fmt.Errorf("ошибка сохранения в базу данных: %v", err)
-	}
-
-	// Формирование короткой ссылки
-	shortURL := fmt.Sprintf("%s/%s", BaseURL, shortLink)
-
-	// Кэширование результата на 10 минут
-	if err := h.redis.Set(ctx, cacheKey, shortURL, 10*time.Minute).Err(); err != nil {
-		log.Printf("Ошибка записи в Redis (shorten): %v", err)
-	} else {
-		log.Printf("Закэшировано (shorten): %s -> %s с TTL 10 минут", originalURL, shortURL)
-	}
-
-	return shortURL, nil
+	return shortLink, nil
 }
 
 // createShortLink обрабатывает POST-запрос для создания короткой ссылки
 func (h *Handler) createShortLink(c *fiber.Ctx) error {
-	// Логирование тела запроса и заголовков для отладки
-	log.Printf("Получено тело запроса: %s", c.Body())
+	log.Printf("Получен POST-запрос на /createShortLink")
+	log.Printf("Тело запроса: %s", c.Body())
 	log.Printf("Заголовки запроса: %v", c.GetReqHeaders())
 
 	var originalURL string
-	// Проверка Content-Type
 	if c.Get("Content-Type") == "application/json" {
 		var req ShortenRequest
 		if err := c.BodyParser(&req); err != nil {
@@ -190,33 +203,123 @@ func (h *Handler) createShortLink(c *fiber.Ctx) error {
 		originalURL = strings.TrimSpace(string(c.Body()))
 	}
 
-	// Проверка, что URL не пустой
 	if originalURL == "" {
 		return c.Status(http.StatusBadRequest).JSON(fiber.Map{
 			"error": "URL обязателен",
 		})
 	}
 
-	// Создание или получение короткой ссылки
-	shortURL, err := h.shortenURL(originalURL)
+	shortLink, err := h.shortenURL(originalURL)
 	if err != nil {
 		return c.Status(http.StatusBadRequest).JSON(fiber.Map{
 			"error": err.Error(),
 		})
 	}
 
-	// Возврат успешного ответа с короткой ссылкой
+	shortURL := fmt.Sprintf("%s/%s", BaseURL, shortLink)
+	message := &ShortenMessage{OriginalURL: originalURL, ShortLink: shortLink}
+	messageBytes, err := json.Marshal(message)
+	if err != nil {
+		log.Printf("Ошибка сериализации сообщения Kafka: %v", err)
+		return c.Status(http.StatusInternalServerError).JSON(fiber.Map{
+			"error": fmt.Sprintf("ошибка сериализации: %v", err),
+		})
+	}
+
+	_, _, err = h.producer.SendMessage(&sarama.ProducerMessage{
+		Topic: "shorten-urls",
+		Value: sarama.ByteEncoder(messageBytes),
+	})
+	if err != nil {
+		log.Printf("Ошибка отправки в Kafka: %v", err)
+		return c.Status(http.StatusInternalServerError).JSON(fiber.Map{
+			"error": fmt.Sprintf("ошибка отправки в Kafka: %v", err),
+		})
+	}
+	log.Printf("Отправлено в Kafka: %s -> %s", originalURL, shortLink)
+
 	return c.Status(http.StatusCreated).JSON(fiber.Map{
 		"message":  "Короткая ссылка создана",
 		"shortURL": shortURL,
 	})
 }
 
-// redirect обрабатывает GET-запрос для редиректа по короткой ссылке
+// consumeShortenURLs обрабатывает сообщения из Kafka
+func (h *Handler) consumeShortenURLs() {
+	kafkaBrokers := strings.Split(os.Getenv("KAFKA_BROKERS"), ",")
+	config := sarama.NewConfig()
+	config.Consumer.Group.Rebalance.Strategy = sarama.BalanceStrategyRoundRobin
+	config.Consumer.Offsets.Initial = sarama.OffsetOldest
+
+	var consumerGroup sarama.ConsumerGroup
+	var err error
+	for i := 0; i < 10; i++ {
+		consumerGroup, err = sarama.NewConsumerGroup(kafkaBrokers, "shorten-urls-group", config)
+		if err == nil {
+			break
+		}
+		log.Printf("Попытка %d: ошибка создания consumer group: %v", i+1, err)
+		time.Sleep(2 * time.Second)
+	}
+	if err != nil {
+		log.Fatalf("Ошибка создания consumer group после 10 попыток: %v", err)
+	}
+	defer consumerGroup.Close()
+
+	ctx := context.Background()
+	for {
+		err := consumerGroup.Consume(ctx, []string{"shorten-urls"}, h)
+		if err != nil {
+			log.Printf("Ошибка consumer group: %v", err)
+			time.Sleep(5 * time.Second)
+		}
+	}
+}
+
+// Setup - реализация sarama.ConsumerGroupHandler
+func (h *Handler) Setup(_ sarama.ConsumerGroupSession) error {
+	return nil
+}
+
+// Cleanup - реализация sarama.ConsumerGroupHandler
+func (h *Handler) Cleanup(_ sarama.ConsumerGroupSession) error {
+	return nil
+}
+
+// ConsumeClaim - обработка сообщений из Kafka
+func (h *Handler) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
+	ctx := context.Background()
+	for message := range claim.Messages() {
+		var shortenMsg ShortenMessage
+		if err := json.Unmarshal(message.Value, &shortenMsg); err != nil {
+			log.Printf("Ошибка десериализации сообщения Kafka: %v", err)
+			continue
+		}
+
+		log.Printf("Обработка сообщения Kafka: original_url=%s, short_link=%s", shortenMsg.OriginalURL, shortenMsg.ShortLink)
+		result, err := h.Db.Exec("INSERT INTO links (link, short_link) VALUES ($1, $2) ON CONFLICT (link) DO NOTHING", shortenMsg.OriginalURL, shortenMsg.ShortLink)
+		if err != nil {
+			log.Printf("Ошибка сохранения в базу данных: %v", err)
+			continue
+		}
+		rowsAffected, _ := result.RowsAffected()
+		log.Printf("Вставлено в БД: %d строк, link=%s, short_link=%s", rowsAffected, shortenMsg.OriginalURL, shortenMsg.ShortLink)
+
+		cacheKey := "shorten:" + shortenMsg.OriginalURL
+		if err := h.redis.Set(ctx, cacheKey, shortenMsg.ShortLink, 10*time.Minute).Err(); err != nil {
+			log.Printf("Ошибка записи в Redis (shorten): %v", err)
+		} else {
+			log.Printf("Закэшировано (shorten): %s -> %s с TTL 10 минут", shortenMsg.OriginalURL, shortenMsg.ShortLink)
+		}
+
+		session.MarkMessage(message, "")
+	}
+	return nil
+}
+
+// redirect обрабатывает GET-запрос для редиректа
 func (h *Handler) redirect(c *fiber.Ctx) error {
 	shortLink := c.Params("key")
-
-	// Проверка в Redis
 	ctx := context.Background()
 	cacheKey := "redirect:" + shortLink
 	if cachedURL, err := h.redis.Get(ctx, cacheKey).Result(); err == nil {
@@ -226,7 +329,6 @@ func (h *Handler) redirect(c *fiber.Ctx) error {
 		log.Printf("Ошибка чтения из Redis (redirect): %v", err)
 	}
 
-	// Поиск оригинального URL в базе данных
 	var originalURL string
 	err := h.Db.QueryRow("SELECT link FROM links WHERE short_link = $1", shortLink).Scan(&originalURL)
 	if err == sql.ErrNoRows {
@@ -240,13 +342,11 @@ func (h *Handler) redirect(c *fiber.Ctx) error {
 		})
 	}
 
-	// Кэширование результата на 10 минут
 	if err := h.redis.Set(ctx, cacheKey, originalURL, 10*time.Minute).Err(); err != nil {
 		log.Printf("Ошибка записи в Redis (redirect): %v", err)
 	} else {
 		log.Printf("Закэшировано (redirect): %s -> %s с TTL 10 минут", shortLink, originalURL)
 	}
 
-	// Перенаправление на оригинальный URL
 	return c.Redirect(originalURL, http.StatusMovedPermanently)
 }
