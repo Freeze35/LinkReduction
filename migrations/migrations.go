@@ -21,9 +21,9 @@ func RunMigrations() {
 	}
 
 	// Сначала подключаемся к системной БД (postgres)
-	sysDSN := utils.DsnString(mainDBName)
+	pgDSN := os.Getenv("")
 
-	db, err := sql.Open("postgres", sysDSN)
+	db, err := sql.Open("postgres", pgDSN)
 	if err != nil {
 		log.Fatalf("ошибка подключения к системной БД: %v", err)
 	}
