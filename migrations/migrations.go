@@ -8,22 +8,21 @@ import (
 	"github.com/golang-migrate/migrate/v4/database/postgres"
 	_ "github.com/golang-migrate/migrate/v4/database/postgres"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
-	"linkreduction/utils"
 	"log"
 	"os"
 )
 
 func RunMigrations() {
-	mainDBName := "postgres"            // Подключаемся к системной БД
+
 	targetDBName := os.Getenv("DBNAME") // Название создаваемой БД
 	if targetDBName == "" {
 		log.Fatal("targetDBName не установлен")
 	}
 
 	// Сначала подключаемся к системной БД (postgres)
-	pgDSN := os.Getenv("")
+	sysDSN := os.Getenv("DB_DSN_POSTGRES")
 
-	db, err := sql.Open("postgres", pgDSN)
+	db, err := sql.Open("postgres", sysDSN)
 	if err != nil {
 		log.Fatalf("ошибка подключения к системной БД: %v", err)
 	}
@@ -53,7 +52,7 @@ func RunMigrations() {
 	}
 
 	// Сначала подключаемся к системной БД (postgres)
-	newDBDSN := utils.DsnString(targetDBName)
+	newDBDSN := os.Getenv("DB_DSN_LINKSDB")
 
 	newDB, err := sql.Open("postgres", newDBDSN)
 	if err != nil {

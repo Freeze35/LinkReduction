@@ -6,7 +6,6 @@ import (
 	"github.com/joho/godotenv"
 	"linkreduction/internal/handler"
 	"linkreduction/migrations"
-	"linkreduction/utils"
 	"log"
 	"os"
 	"os/signal"
@@ -20,7 +19,7 @@ func main() {
 	}
 
 	// Получаем строку подключения к базе данных
-	dbURL := utils.DsnString(os.Getenv("DBNAME"))
+	dbURL := os.Getenv("DB_DSN_LINKSDB")
 	if dbURL == "" {
 		log.Fatalf("Переменная окружения DATABASE_URL не задана")
 	}
