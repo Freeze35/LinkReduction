@@ -4,10 +4,11 @@ import (
 	"context"
 	"github.com/gofiber/fiber/v2"
 	"github.com/joho/godotenv"
+	_ "github.com/prometheus/client_golang/prometheus"
+	"github.com/sirupsen/logrus"
 	"linkreduction/internal/handler"
 	initprometheus "linkreduction/internal/prometheus"
 	"linkreduction/migrations"
-	"log"
 	"os"
 	"os/signal"
 	"syscall"
@@ -15,53 +16,93 @@ import (
 
 func main() {
 
+	// Настройка logrus
+	logger := logrus.New()
+	logger.SetFormatter(&logrus.JSONFormatter{})
+	logger.SetLevel(logrus.InfoLevel)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	// Загружаем переменные из файла .env
 	if err := godotenv.Load("/app/.env"); err != nil {
-		log.Fatalf("Ошибка загрузки .env файла: %v", err)
+		logger.WithFields(logrus.Fields{
+			"component": "main",
+			"error":     err,
+		}).Fatal("Ошибка загрузки .env файла")
 	}
 
 	// Выполняем миграции
+	logger.WithField("component", "main").Info("Запуск миграций базы данных")
 	migrations.RunMigrations()
+	logger.WithField("component", "main").Info("Миграции успешно применены")
 
-	//Инициализация handlerDependency
+	// Инициализация handlerDependency
 	dep := handler.Dependency{}
 
-	//Инициализация Подключения DB
+	// Инициализация подключения к PostgreSQL
 	db, err := dep.InitPostgres()
-	// Обеспечим закрытие соединения при завершении
+	if err != nil {
+		logger.WithFields(logrus.Fields{
+			"component": "main",
+			"error":     err,
+		}).Fatal("Ошибка инициализации базы данных")
+	}
 	defer func() {
 		if err := db.Close(); err != nil {
-			log.Fatalf("Ошибка при закрытии базы данных: %v", err)
+			logger.WithFields(logrus.Fields{
+				"component": "main",
+				"error":     err,
+			}).Error("Ошибка при закрытии базы данных")
 		}
 	}()
 
-	//Инициализация Подключения Redis
+	// Инициализация подключения к Redis
 	redisClient, err := dep.RedisConnect(ctx)
-	// Обеспечим закрытие redis соединения при завершении
+	if err != nil {
+		logger.WithFields(logrus.Fields{
+			"component": "main",
+			"error":     err,
+		}).Fatal("Ошибка инициализации Redis")
+	}
 	defer func() {
-		if err := db.Close(); err != nil {
-			log.Fatalf("Ошибка при закрытии redis соединения: %v", err)
+		if err := redisClient.Close(); err != nil {
+			logger.WithFields(logrus.Fields{
+				"component": "main",
+				"error":     err,
+			}).Error("Ошибка при закрытии Redis соединения")
 		}
 	}()
 
-	//Инициализация Подключения Kafka
+	// Инициализация подключения к Kafka
 	kafka, err := dep.KafkaConnect()
-	defer func() {
-		if err := db.Close(); err != nil {
-			log.Fatalf("Ошибка при закрытии kafka соединения: %v", err)
-		}
-	}()
+	if err != nil {
+		logger.WithFields(logrus.Fields{
+			"component": "main",
+			"error":     err,
+		}).Fatal("Ошибка инициализации Kafka")
+	}
+	if kafka != nil {
+		defer func() {
+			if err := kafka.Close(); err != nil {
+				logger.WithFields(logrus.Fields{
+					"component": "main",
+					"error":     err,
+				}).Error("Ошибка при закрытии Kafka соединения")
+			}
+		}()
+	}
 
-	//
+	// Инициализация Prometheus метрик
 	metrics := initprometheus.InitPrometheus()
 
-	// Передаём подключение в handler через DI
+	// Передаём подключение и логгер в handler через DI
 	h, err := handler.NewHandler(db, redisClient, kafka, metrics)
 	if err != nil {
-		log.Fatalf("Ошибка инициализации обработчика: %v", err)
+		logger.WithFields(logrus.Fields{
+			"component": "main",
+			"error":     err,
+		}).Fatal("Ошибка инициализации обработчика")
 	}
 
 	// Настройка Fiber
@@ -79,7 +120,7 @@ func main() {
 
 	// Запускаем сервер в горутине
 	go func() {
-		log.Println("Сервер запущен на http://localhost:8080")
+		logger.WithField("component", "main").Info("Сервер запущен на http://localhost:8080")
 		if err := app.Listen(":8080"); err != nil {
 			serverErr <- err
 		}
@@ -87,16 +128,25 @@ func main() {
 
 	select {
 	case sig := <-quit:
-		log.Printf("Получен системный сигнал: %s", sig)
+		logger.WithFields(logrus.Fields{
+			"component": "main",
+			"signal":    sig,
+		}).Info("Получен системный сигнал")
 	case err := <-serverErr:
-		log.Printf("Ошибка сервера: %v", err)
+		logger.WithFields(logrus.Fields{
+			"component": "main",
+			"error":     err,
+		}).Error("Ошибка сервера")
 	}
 
 	// Попытка корректного завершения
-	log.Println("Остановка сервера...")
+	logger.WithField("component", "main").Info("Остановка сервера...")
 	if err := app.Shutdown(); err != nil {
-		log.Fatalf("Ошибка при завершении сервера: %v", err)
+		logger.WithFields(logrus.Fields{
+			"component": "main",
+			"error":     err,
+		}).Error("Ошибка при завершении сервера")
 	}
 
-	log.Println("Сервер успешно остановлен.")
+	logger.WithField("component", "main").Info("Сервер успешно остановлен")
 }
