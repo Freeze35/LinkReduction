@@ -1,10 +1,11 @@
 package main
 
 import (
-	"database/sql"
+	"context"
 	"github.com/gofiber/fiber/v2"
 	"github.com/joho/godotenv"
 	"linkreduction/internal/handler"
+	initprometheus "linkreduction/internal/prometheus"
 	"linkreduction/migrations"
 	"log"
 	"os"
@@ -13,31 +14,55 @@ import (
 )
 
 func main() {
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	// Загружаем переменные из файла .env
 	if err := godotenv.Load("/app/.env"); err != nil {
 		log.Fatalf("Ошибка загрузки .env файла: %v", err)
 	}
 
-	// Получаем строку подключения к базе данных
-	dbURL := os.Getenv("DB_DSN_LINKSDB")
-	if dbURL == "" {
-		log.Fatalf("Переменная окружения DATABASE_URL не задана")
-	}
-
 	// Выполняем миграции
 	migrations.RunMigrations()
 
-	// Инициализация обработчика
-	h, err := handler.NewHandler(dbURL)
+	//Инициализация handlerDependency
+	dep := handler.Dependency{}
+
+	//Инициализация Подключения DB
+	db, err := dep.InitPostgres()
+	// Обеспечим закрытие соединения при завершении
+	defer func() {
+		if err := db.Close(); err != nil {
+			log.Fatalf("Ошибка при закрытии базы данных: %v", err)
+		}
+	}()
+
+	//Инициализация Подключения Redis
+	redisClient, err := dep.RedisConnect(ctx)
+	// Обеспечим закрытие redis соединения при завершении
+	defer func() {
+		if err := db.Close(); err != nil {
+			log.Fatalf("Ошибка при закрытии redis соединения: %v", err)
+		}
+	}()
+
+	//Инициализация Подключения Kafka
+	kafka, err := dep.KafkaConnect()
+	defer func() {
+		if err := db.Close(); err != nil {
+			log.Fatalf("Ошибка при закрытии kafka соединения: %v", err)
+		}
+	}()
+
+	//
+	metrics := initprometheus.InitPrometheus()
+
+	// Передаём подключение в handler через DI
+	h, err := handler.NewHandler(db, redisClient, kafka, metrics)
 	if err != nil {
 		log.Fatalf("Ошибка инициализации обработчика: %v", err)
 	}
-	defer func(Db *sql.DB) {
-		err := Db.Close()
-		if err != nil {
-			log.Fatalf("Внутреняя ошибка закрытия базы данных:%v", err)
-		}
-	}(h.Db)
 
 	// Настройка Fiber
 	app := fiber.New()

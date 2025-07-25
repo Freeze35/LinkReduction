@@ -54,80 +54,15 @@ type ShortenMessage struct {
 }
 
 // NewHandler создаёт новый экземпляр Handler
-func NewHandler(dbURL string) (*Handler, error) {
-	// Подключение к PostgreSQL
-	db, err := sql.Open("postgres", dbURL)
-	if err != nil {
-		return nil, fmt.Errorf("ошибка открытия базы данных: %v", err)
-	}
-	if err = db.Ping(); err != nil {
-		return nil, fmt.Errorf("база данных недоступна: %v", err)
-	}
-
-	// Проверка BaseURL
-	if BaseURL == "" {
-		return nil, fmt.Errorf("BaseURL пуст")
-	}
-
-	// Подключение к Redis
-	redisURL := os.Getenv("REDIS_URL")
-	if redisURL == "" {
-		return nil, fmt.Errorf("REDIS_URL пуст")
-	}
-	log.Printf("Подключение к Redis: %s", redisURL)
-	redisClient := redis.NewClient(&redis.Options{Addr: redisURL})
-	ctx := context.Background()
-	if _, err = redisClient.Ping(ctx).Result(); err != nil {
-		return nil, fmt.Errorf("Redis недоступен: %v", err)
-	}
-	log.Printf("Redis успешно подключён")
-
-	// Подключение к Kafka
-	kafkaBrokers := strings.Split(os.Getenv("KAFKA_BROKERS"), ",")
-	log.Printf("KAFKA_BROKERS value: %v", os.Getenv("KAFKA_BROKERS"))
-	if len(kafkaBrokers) == 0 || kafkaBrokers[0] == "" {
-		return nil, fmt.Errorf("KAFKA_BROKERS пуст")
-	}
-	log.Printf("Подключение к Kafka: %v", kafkaBrokers)
-	config := sarama.NewConfig()
-	config.Producer.Return.Successes = true
-	config.Producer.RequiredAcks = sarama.WaitForAll
-	config.Producer.Retry.Max = 5
-	config.Producer.Retry.Backoff = 100 * time.Millisecond
-
-	var producer sarama.SyncProducer
-	for i := 0; i < 10; i++ {
-		producer, err = sarama.NewSyncProducer(kafkaBrokers, config)
-		if err == nil {
-			break
-		}
-		log.Printf("Попытка %d: ошибка подключения к Kafka: %v", i+1, err)
-		time.Sleep(2 * time.Second)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("ошибка подключения к Kafka после 10 попыток: %v", err)
-	}
-	log.Printf("Kafka успешно подключён")
+func NewHandler(db *sql.DB, redisClient *redis.Client, producer sarama.SyncProducer,
+	prometheus *initprometheus.PrometheusMetrics) (*Handler, error) {
 
 	return &Handler{
 		Db:       db,
 		redis:    redisClient,
 		producer: producer,
-		metrics:  initprometheus.InitPrometheus(),
+		metrics:  prometheus,
 	}, nil
-}
-
-// Close закрывает соединения
-func (h *Handler) Close() {
-	if h.Db != nil {
-		h.Db.Close()
-	}
-	if h.redis != nil {
-		h.redis.Close()
-	}
-	if h.producer != nil {
-		h.producer.Close()
-	}
 }
 
 // generateShortLink генерирует короткий ключ (6 символов)
@@ -267,7 +202,7 @@ func (h *Handler) createShortLink(c *fiber.Ctx) error {
 
 // consumeShortenURLs обрабатывает сообщения из Kafka
 func (h *Handler) consumeShortenURLs() {
-	kafkaBrokers := strings.Split(os.Getenv("KAFKA_BROKERS"), ",")
+	kafkaBrokers := strings.Split(os.Getenv("KAFKA_BROKER"), ",")
 	config := sarama.NewConfig()
 	config.Consumer.Group.Rebalance.Strategy = sarama.BalanceStrategyRoundRobin
 	config.Consumer.Offsets.Initial = sarama.OffsetOldest
