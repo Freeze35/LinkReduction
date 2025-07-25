@@ -4,10 +4,13 @@ import (
 	"context"
 	"github.com/gofiber/fiber/v2"
 	"github.com/joho/godotenv"
-	_ "github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
+	"linkreduction/internal/cleanup"
 	"linkreduction/internal/handler"
-	initprometheus "linkreduction/internal/prometheus"
+	"linkreduction/internal/kafka"
+	"linkreduction/internal/prometheus"
+	"linkreduction/internal/repository"
+	"linkreduction/internal/service"
 	"linkreduction/migrations"
 	"os"
 	"os/signal"
@@ -15,7 +18,6 @@ import (
 )
 
 func main() {
-
 	// Настройка logrus
 	logger := logrus.New()
 	logger.SetFormatter(&logrus.JSONFormatter{})
@@ -37,7 +39,7 @@ func main() {
 	migrations.RunMigrations()
 	logger.WithField("component", "main").Info("Миграции успешно применены")
 
-	// Инициализация handlerDependency
+	// Инициализация зависимостей
 	dep := handler.NewDependency()
 
 	// Инициализация подключения к PostgreSQL
@@ -75,16 +77,16 @@ func main() {
 	}()
 
 	// Инициализация подключения к Kafka
-	kafka, err := dep.KafkaConnect(logger)
+	kafkaProducer, err := dep.KafkaConnect(logger)
 	if err != nil {
 		logger.WithFields(logrus.Fields{
 			"component": "main",
 			"error":     err,
 		}).Fatal("Ошибка инициализации Kafka")
 	}
-	if kafka != nil {
+	if kafkaProducer != nil {
 		defer func() {
-			if err := kafka.Close(); err != nil {
+			if err := kafkaProducer.Close(); err != nil {
 				logger.WithFields(logrus.Fields{
 					"component": "main",
 					"error":     err,
@@ -96,8 +98,17 @@ func main() {
 	// Инициализация Prometheus метрик
 	metrics := initprometheus.InitPrometheus()
 
-	// Передаём подключение и логгер в handler через DI
-	h, err := handler.NewHandler(db, redisClient, kafka, metrics, logger)
+	// Инициализация репозиториев
+	linkRepo := repository.NewPostgresLinkRepository(db, logger)
+	cache := repository.NewRedisCache(redisClient, logger)
+
+	// Инициализация сервисов
+	linkService := service.NewLinkService(linkRepo, cache, logger)
+	cleanupService := cleanup.NewCleanupService(linkRepo, logger)
+	kafkaConsumer := kafka.NewConsumer(kafkaProducer, linkRepo, cache, logger)
+
+	// Инициализация обработчика HTTP
+	h, err := handler.NewHandler(linkService, metrics, logger)
 	if err != nil {
 		logger.WithFields(logrus.Fields{
 			"component": "main",
@@ -110,6 +121,14 @@ func main() {
 
 	// Инициализация маршрутов
 	h.InitRoutes(app)
+
+	// Запуск Kafka consumer, если Kafka доступна
+	if kafkaConsumer != nil {
+		go kafkaConsumer.ConsumeShortenURLs()
+	}
+
+	// Запуск очистки старых ссылок
+	go cleanupService.CleanupOldLinks()
 
 	// Канал для сигналов завершения
 	quit := make(chan os.Signal, 1)

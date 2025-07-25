@@ -20,14 +20,11 @@ type DependencyI interface {
 
 type Dependency struct{}
 
-// NewDependency создаёт новый экземпляр Dependency
 func NewDependency() *Dependency {
 	return &Dependency{}
 }
 
 func (h *Dependency) InitPostgres(logger *logrus.Logger) (*sql.DB, error) {
-
-	// Получаем строку подключения к базе данных
 	dbURL := os.Getenv("DB_DSN_LINKSDB")
 	if dbURL == "" {
 		logger.Fatal("Переменная окружения DB_DSN_LINKSDB не задана")
@@ -50,7 +47,6 @@ func (h *Dependency) InitPostgres(logger *logrus.Logger) (*sql.DB, error) {
 }
 
 func (h *Dependency) RedisConnect(ctx context.Context, logger *logrus.Logger) (*redis.Client, error) {
-
 	redisURL := os.Getenv("REDIS_URL")
 	if redisURL == "" {
 		logger.Fatal("Переменная окружения REDIS_URL не задана")
@@ -69,17 +65,15 @@ func (h *Dependency) RedisConnect(ctx context.Context, logger *logrus.Logger) (*
 }
 
 func (h *Dependency) KafkaConnect(logger *logrus.Logger) (sarama.SyncProducer, error) {
-
 	kafkaEnv := os.Getenv("KAFKA_BROKERS")
 	kafkaBrokers := strings.Split(kafkaEnv, ",")
 
 	logger.WithField("kafka_brokers", kafkaEnv).Info("Проверка переменной окружения KAFKA_BROKERS")
 	if len(kafkaBrokers) == 0 || kafkaBrokers[0] == "" {
 		logger.Info("Переменная окружения KAFKA_BROKERS пуста или не задана, Kafka будет отключена")
-		return nil, nil // Возвращаем nil, чтобы обозначить отсутствие Kafka
+		return nil, nil
 	}
 
-	// Проверяем, что все брокеры имеют валидные адреса
 	for _, broker := range kafkaBrokers {
 		if strings.TrimSpace(broker) == "" {
 			logger.Info("Обнаружен пустой адрес брокера Kafka, Kafka будет отключена")
@@ -88,7 +82,6 @@ func (h *Dependency) KafkaConnect(logger *logrus.Logger) (sarama.SyncProducer, e
 	}
 
 	logger.WithField("kafka_brokers", kafkaBrokers).Info("Подключение к Kafka")
-
 	config := sarama.NewConfig()
 	config.Producer.Return.Successes = true
 	config.Producer.RequiredAcks = sarama.WaitForAll
