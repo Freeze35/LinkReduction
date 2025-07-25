@@ -38,10 +38,10 @@ func main() {
 	logger.WithField("component", "main").Info("Миграции успешно применены")
 
 	// Инициализация handlerDependency
-	dep := handler.Dependency{}
+	dep := handler.NewDependency()
 
 	// Инициализация подключения к PostgreSQL
-	db, err := dep.InitPostgres()
+	db, err := dep.InitPostgres(logger)
 	if err != nil {
 		logger.WithFields(logrus.Fields{
 			"component": "main",
@@ -58,7 +58,7 @@ func main() {
 	}()
 
 	// Инициализация подключения к Redis
-	redisClient, err := dep.RedisConnect(ctx)
+	redisClient, err := dep.RedisConnect(ctx, logger)
 	if err != nil {
 		logger.WithFields(logrus.Fields{
 			"component": "main",
@@ -75,7 +75,7 @@ func main() {
 	}()
 
 	// Инициализация подключения к Kafka
-	kafka, err := dep.KafkaConnect()
+	kafka, err := dep.KafkaConnect(logger)
 	if err != nil {
 		logger.WithFields(logrus.Fields{
 			"component": "main",
@@ -97,7 +97,7 @@ func main() {
 	metrics := initprometheus.InitPrometheus()
 
 	// Передаём подключение и логгер в handler через DI
-	h, err := handler.NewHandler(db, redisClient, kafka, metrics)
+	h, err := handler.NewHandler(db, redisClient, kafka, metrics, logger)
 	if err != nil {
 		logger.WithFields(logrus.Fields{
 			"component": "main",

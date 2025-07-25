@@ -6,79 +6,88 @@ import (
 	"fmt"
 	"github.com/IBM/sarama"
 	"github.com/redis/go-redis/v9"
-	"log"
+	"github.com/sirupsen/logrus"
 	"os"
 	"strings"
 	"time"
 )
 
 type DependencyI interface {
-	InitPostgres() (*sql.DB, error)
-	RedisConnect(ctx context.Context) (*redis.Client, error)
-	KafkaConnect() (sarama.SyncProducer, error)
+	InitPostgres(logger *logrus.Logger) (*sql.DB, error)
+	RedisConnect(ctx context.Context, logger *logrus.Logger) (*redis.Client, error)
+	KafkaConnect(logger *logrus.Logger) (sarama.SyncProducer, error)
 }
 
 type Dependency struct{}
 
-func (h *Dependency) InitPostgres() (*sql.DB, error) {
+// NewDependency создаёт новый экземпляр Dependency
+func NewDependency() *Dependency {
+	return &Dependency{}
+}
+
+func (h *Dependency) InitPostgres(logger *logrus.Logger) (*sql.DB, error) {
+
 	// Получаем строку подключения к базе данных
 	dbURL := os.Getenv("DB_DSN_LINKSDB")
 	if dbURL == "" {
-		log.Fatal("Переменная окружения DB_DSN_LINKSDB не задана")
+		logger.Fatal("Переменная окружения DB_DSN_LINKSDB не задана")
 	}
 
-	// Подключение к базе данных
+	logger.WithField("db_url", dbURL).Info("Подключение к базе данных")
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
-		log.Printf("Ошибка открытия базы данных: %v", err)
+		logger.WithField("error", err).Error("Ошибка открытия базы данных")
 		return nil, fmt.Errorf("ошибка открытия базы данных: %w", err)
 	}
 
 	if err := db.Ping(); err != nil {
-		log.Printf("База данных недоступна: %v", err)
+		logger.WithField("error", err).Error("База данных недоступна")
 		return nil, fmt.Errorf("база данных недоступна: %v", err)
 	}
 
-	log.Printf("База данных успешно подключена: %s", dbURL)
+	logger.WithField("db_url", dbURL).Info("База данных успешно подключена")
 	return db, nil
 }
 
-func (h *Dependency) RedisConnect(ctx context.Context) (*redis.Client, error) {
+func (h *Dependency) RedisConnect(ctx context.Context, logger *logrus.Logger) (*redis.Client, error) {
+
 	redisURL := os.Getenv("REDIS_URL")
 	if redisURL == "" {
-		log.Fatal("Переменная окружения REDIS_URL не задана")
+		logger.Fatal("Переменная окружения REDIS_URL не задана")
 	}
 
-	log.Printf("Подключение к Redis: %s", redisURL)
+	logger.WithField("redis_url", redisURL).Info("Подключение к Redis")
 	redisClient := redis.NewClient(&redis.Options{Addr: redisURL})
 
 	if _, err := redisClient.Ping(ctx).Result(); err != nil {
-		log.Printf("Redis недоступен: %v", err)
+		logger.WithField("error", err).Error("Redis недоступен")
+		return nil, fmt.Errorf("Redis недоступен: %v", err)
 	}
 
-	log.Println("Redis успешно подключён")
+	logger.Info("Redis успешно подключён")
 	return redisClient, nil
 }
 
-func (h *Dependency) KafkaConnect() (sarama.SyncProducer, error) {
-	kafkaEnv := os.Getenv("KAFKA_BROKER")
+func (h *Dependency) KafkaConnect(logger *logrus.Logger) (sarama.SyncProducer, error) {
+
+	kafkaEnv := os.Getenv("KAFKA_BROKERS")
 	kafkaBrokers := strings.Split(kafkaEnv, ",")
 
-	log.Printf("Проверка переменной окружения KAFKA_BROKER: %s", kafkaEnv)
+	logger.WithField("kafka_brokers", kafkaEnv).Info("Проверка переменной окружения KAFKA_BROKERS")
 	if len(kafkaBrokers) == 0 || kafkaBrokers[0] == "" {
-		log.Println("Переменная окружения KAFKA_BROKER пуста или не задана, Kafka будет отключена")
+		logger.Info("Переменная окружения KAFKA_BROKERS пуста или не задана, Kafka будет отключена")
 		return nil, nil // Возвращаем nil, чтобы обозначить отсутствие Kafka
 	}
 
 	// Проверяем, что все брокеры имеют валидные адреса
 	for _, broker := range kafkaBrokers {
 		if strings.TrimSpace(broker) == "" {
-			log.Println("Обнаружен пустой адрес брокера Kafka, Kafka будет отключена")
+			logger.Info("Обнаружен пустой адрес брокера Kafka, Kafka будет отключена")
 			return nil, nil
 		}
 	}
 
-	log.Printf("Подключение к Kafka: %v", kafkaBrokers)
+	logger.WithField("kafka_brokers", kafkaBrokers).Info("Подключение к Kafka")
 
 	config := sarama.NewConfig()
 	config.Producer.Return.Successes = true
@@ -93,15 +102,18 @@ func (h *Dependency) KafkaConnect() (sarama.SyncProducer, error) {
 		if err == nil {
 			break
 		}
-		log.Printf("Ошибка подключения к Kafka, попытка %d: %v", i+1, err)
+		logger.WithFields(logrus.Fields{
+			"attempt": i + 1,
+			"error":   err,
+		}).Error("Ошибка подключения к Kafka")
 		time.Sleep(2 * time.Second)
 	}
 
 	if err != nil {
-		log.Printf("Ошибка подключения к Kafka после 10 попыток, Kafka будет отключена: %v", err)
+		logger.WithField("error", err).Warn("Ошибка подключения к Kafka после 10 попыток, Kafka будет отключена")
 		return nil, nil
 	}
 
-	log.Println("Kafka успешно подключён")
+	logger.Info("Kafka успешно подключён")
 	return producer, nil
 }
