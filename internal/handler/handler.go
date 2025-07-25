@@ -18,15 +18,17 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
 // InitRoutes настраивает маршруты
 func (h *Handler) InitRoutes(app *fiber.App) {
-	app.Get("/metrics", adaptor.HTTPHandler(promhttp.Handler())) // Переместить выше
+	app.Get("/metrics", adaptor.HTTPHandler(promhttp.Handler()))
 	app.Post("/createShortLink", h.createShortLink)
-	app.Get("/:key", h.redirect) // Динамический маршрут ниже
+	app.Get("/:key", h.redirect)
 	go h.consumeShortenURLs()
+	go h.cleanupOldLinks() // Запуск горутины для очистки старых записей
 }
 
 // BaseURL - базовый домен для коротких ссылок
@@ -111,7 +113,7 @@ func NewHandler(dbURL string) (*Handler, error) {
 		Db:       db,
 		redis:    redisClient,
 		producer: producer,
-		metrics:  initprometheus.InitPrometheus(), // Инициализация метрик для prometheus
+		metrics:  initprometheus.InitPrometheus(),
 	}, nil
 }
 
@@ -305,9 +307,48 @@ func (h *Handler) Cleanup(_ sarama.ConsumerGroupSession) error {
 	return nil
 }
 
-// ConsumeClaim - обработка сообщений из Kafka
+// ConsumeClaim обрабатывает сообщения из Kafka с батч-вставкой
 func (h *Handler) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
 	ctx := context.Background()
+	batchSize := 100                 // Максимальный размер батча
+	batchTimeout := 10 * time.Second // Максимальное время ожидания для батча
+	batch := make([]ShortenMessage, 0, batchSize)
+	batchChan := make(chan ShortenMessage, batchSize)
+	var wg sync.WaitGroup
+
+	// Горутина для пакетной вставки
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(batchTimeout)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case msg, ok := <-batchChan:
+				if !ok {
+					if len(batch) > 0 {
+						h.insertBatch(ctx, batch)
+					}
+					return
+				}
+				batch = append(batch, msg)
+				if len(batch) >= batchSize {
+					h.insertBatch(ctx, batch)
+					batch = batch[:0]
+					ticker.Reset(batchTimeout)
+				}
+			case <-ticker.C:
+				if len(batch) > 0 {
+					h.insertBatch(ctx, batch)
+					batch = batch[:0]
+				}
+				ticker.Reset(batchTimeout)
+			}
+		}
+	}()
+
+	// Обработка сообщений из Kafka
 	for message := range claim.Messages() {
 		var shortenMsg ShortenMessage
 		if err := json.Unmarshal(message.Value, &shortenMsg); err != nil {
@@ -317,26 +358,104 @@ func (h *Handler) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama
 		}
 
 		log.Printf("Обработка сообщения Kafka: original_url=%s, short_link=%s", shortenMsg.OriginalURL, shortenMsg.ShortLink)
-		result, err := h.Db.Exec("INSERT INTO links (link, short_link) VALUES ($1, $2) ON CONFLICT (link) DO NOTHING", shortenMsg.OriginalURL, shortenMsg.ShortLink)
+		batchChan <- shortenMsg
+		session.MarkMessage(message, "")
+	}
+
+	// Закрываем канал и ждём завершения батч-вставки
+	close(batchChan)
+	wg.Wait()
+	return nil
+}
+
+// insertBatch выполняет пакетную вставку в PostgreSQL
+func (h *Handler) insertBatch(ctx context.Context, batch []ShortenMessage) {
+	if len(batch) == 0 {
+		return
+	}
+
+	tx, err := h.Db.BeginTx(ctx, nil)
+	if err != nil {
+		log.Printf("Ошибка начала транзакции: %v", err)
+		for range batch {
+			h.metrics.DbInsertTotal.WithLabelValues("error").Inc()
+		}
+		return
+	}
+
+	stmt, err := tx.PrepareContext(ctx, "INSERT INTO links (link, short_link, created_at) VALUES ($1, $2, NOW()) ON CONFLICT (link) DO NOTHING")
+	if err != nil {
+		log.Printf("Ошибка подготовки запроса: %v", err)
+		tx.Rollback()
+		for range batch {
+			h.metrics.DbInsertTotal.WithLabelValues("error").Inc()
+		}
+		return
+	}
+	defer stmt.Close()
+
+	rowsAffected := int64(0)
+	for _, msg := range batch {
+		result, err := stmt.ExecContext(ctx, msg.OriginalURL, msg.ShortLink)
 		if err != nil {
-			log.Printf("Ошибка сохранения в базу данных: %v", err)
+			log.Printf("Ошибка вставки в БД: %v", err)
 			h.metrics.DbInsertTotal.WithLabelValues("error").Inc()
 			continue
 		}
-		rowsAffected, _ := result.RowsAffected()
-		log.Printf("Вставлено в БД: %d строк, link=%s, short_link=%s", rowsAffected, shortenMsg.OriginalURL, shortenMsg.ShortLink)
-		h.metrics.DbInsertTotal.WithLabelValues("success").Inc()
-
-		cacheKey := "shorten:" + shortenMsg.OriginalURL
-		if err := h.redis.Set(ctx, cacheKey, shortenMsg.ShortLink, 10*time.Minute).Err(); err != nil {
-			log.Printf("Ошибка записи в Redis (shorten): %v", err)
-		} else {
-			log.Printf("Закэшировано (shorten): %s -> %s с TTL 10 минут", shortenMsg.OriginalURL, shortenMsg.ShortLink)
+		if ra, _ := result.RowsAffected(); ra > 0 {
+			rowsAffected++
+			// Кэширование в Redis
+			cacheKey := "shorten:" + msg.OriginalURL
+			if err := h.redis.Set(ctx, cacheKey, msg.ShortLink, 10*time.Minute).Err(); err != nil {
+				log.Printf("Ошибка записи в Redis (shorten): %v", err)
+			} else {
+				log.Printf("Закэшировано (shorten): %s -> %s с TTL 10 минут", msg.OriginalURL, msg.ShortLink)
+			}
 		}
-
-		session.MarkMessage(message, "")
 	}
-	return nil
+
+	if err := tx.Commit(); err != nil {
+		log.Printf("Ошибка коммита транзакции: %v", err)
+		tx.Rollback()
+		for range batch {
+			h.metrics.DbInsertTotal.WithLabelValues("error").Inc()
+		}
+		return
+	}
+
+	log.Printf("Вставлено в БД: %d строк из %d сообщений", rowsAffected, len(batch))
+	for i := 0; i < int(rowsAffected); i++ {
+		h.metrics.DbInsertTotal.WithLabelValues("success").Inc()
+	}
+	for i := int(rowsAffected); i < len(batch); i++ {
+		h.metrics.DbInsertTotal.WithLabelValues("error").Inc()
+	}
+}
+
+// cleanupOldLinks периодически удаляет записи старше 2 недель
+func (h *Handler) cleanupOldLinks() {
+	ctx := context.Background()
+	ticker := time.NewTicker(2 * time.Hour)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			result, err := h.Db.ExecContext(ctx, "DELETE FROM links WHERE created_at < NOW() - INTERVAL '2 weeks'")
+			if err != nil {
+				log.Printf("Ошибка удаления старых записей: %v", err)
+				h.metrics.CleanupTotal.WithLabelValues("error").Inc()
+				continue
+			}
+			rowsAffected, _ := result.RowsAffected()
+			if rowsAffected > 0 {
+				log.Printf("Удалено %d старых записей из БД", rowsAffected)
+				for i := 0; i < int(rowsAffected); i++ {
+					h.metrics.CleanupTotal.WithLabelValues("success").Inc()
+				}
+			}
+		}
+	}
 }
 
 // redirect обрабатывает GET-запрос для редиректа

@@ -2,26 +2,17 @@ package initprometheus
 
 import "github.com/prometheus/client_golang/prometheus"
 
-// prometheusMetrics - структура для хранения метрик Prometheus
+// PrometheusMetrics - структура для хранения метрик Prometheus
 type PrometheusMetrics struct {
 	CreateShortLinkTotal   *prometheus.CounterVec
 	DbInsertTotal          *prometheus.CounterVec
 	RedirectTotal          *prometheus.CounterVec
 	CreateShortLinkLatency *prometheus.HistogramVec
+	CleanupTotal           *prometheus.CounterVec // Новая метрика для удалений
 }
 
-// initPrometheus инициализирует метрики Prometheus
+// InitPrometheus инициализирует метрики Prometheus
 func InitPrometheus() *PrometheusMetrics {
-
-	/*shortener_create_short_link_total:
-	  	Общее количество запросов на создание коротких ссылок через эндпоинт /createShortLink, разделённых по статусу (success или error).
-	  shortener_db_insert_total:
-	  	Общее количество операций вставки коротких ссылок в базу данных PostgreSQL, выполняемых функцией ConsumeClaim через Kafka, разделённых по статусу (success или error).
-	  shortener_redirect_total:
-	  	Общее количество запросов на редирект по коротким ссылкам через эндпоинт /:key, разделённых по статусу (success или error).
-	  shortener_create_short_link_latency_seconds:
-	  	Латентность (время выполнения) запросов на создание коротких ссылок через эндпоинт /createShortLink, измеряемая в секундах, разделённая по статусу (success).*/
-
 	metrics := &PrometheusMetrics{
 		CreateShortLinkTotal: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
@@ -52,6 +43,13 @@ func InitPrometheus() *PrometheusMetrics {
 			},
 			[]string{"status"},
 		),
+		CleanupTotal: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "shortener_cleanup_total",
+				Help: "Total number of old links removed from the database",
+			},
+			[]string{"status"},
+		),
 	}
 
 	// Регистрация метрик в Prometheus
@@ -59,6 +57,7 @@ func InitPrometheus() *PrometheusMetrics {
 	prometheus.MustRegister(metrics.DbInsertTotal)
 	prometheus.MustRegister(metrics.RedirectTotal)
 	prometheus.MustRegister(metrics.CreateShortLinkLatency)
+	prometheus.MustRegister(metrics.CleanupTotal)
 
 	return metrics
 }
