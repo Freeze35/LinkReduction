@@ -26,11 +26,12 @@ type Consumer struct {
 	repo     postgres.LinkRepo
 	cache    redis.LinkCache
 	logger   *logrus.Logger
+	ctx      context.Context
 }
 
 // NewConsumer создаёт новый экземпляр Consumer
-func NewConsumer(producer sarama.SyncProducer, repo postgres.LinkRepo, cache redis.LinkCache, logger *logrus.Logger) *Consumer {
-	return &Consumer{producer: producer, repo: repo, cache: cache, logger: logger}
+func NewConsumer(producer sarama.SyncProducer, repo postgres.LinkRepo, cache redis.LinkCache, logger *logrus.Logger, ctx context.Context) *Consumer {
+	return &Consumer{producer: producer, repo: repo, cache: cache, logger: logger, ctx: ctx}
 }
 
 // ConsumeShortenURLs обрабатывает сообщения из Kafka
@@ -67,9 +68,8 @@ func (c *Consumer) ConsumeShortenURLs() error {
 	}
 	defer consumerGroup.Close()
 
-	ctx := context.Background()
 	for {
-		err := consumerGroup.Consume(ctx, []string{"shorten-urls"}, c)
+		err := consumerGroup.Consume(c.ctx, []string{"shorten-urls"}, c)
 		if err != nil {
 			time.Sleep(5 * time.Second)
 		}
@@ -79,7 +79,7 @@ func (c *Consumer) ConsumeShortenURLs() error {
 // ConsumeClaim обрабатывает сообщения из Kafka с батч-вставкой
 func (c *Consumer) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error { // Added error return type
 	logger := c.logger.WithField("component", "kafka")
-	ctx := context.Background()
+
 	batchSize := 100                 // Максимальный размер батча
 	batchTimeout := 10 * time.Second // Максимальное время ожидания для батча
 	batch := make([]postgres.LinkURL, 0, batchSize)
@@ -99,7 +99,7 @@ func (c *Consumer) ConsumeClaim(session sarama.ConsumerGroupSession, claim saram
 			case msg, ok := <-batchChan:
 				if !ok {
 					if len(batch) > 0 {
-						if err := c.insertBatch(ctx, batch); err != nil {
+						if err := c.insertBatch(c.ctx, batch); err != nil {
 							logger.Error("Ошибка при вставке последнего батча: ", err)
 						}
 					}
@@ -107,7 +107,7 @@ func (c *Consumer) ConsumeClaim(session sarama.ConsumerGroupSession, claim saram
 				}
 				batch = append(batch, msg)
 				if len(batch) >= batchSize {
-					if err := c.insertBatch(ctx, batch); err != nil {
+					if err := c.insertBatch(c.ctx, batch); err != nil {
 						logger.Error("Ошибка при вставке батча: ", err)
 					}
 					batch = batch[:0]
@@ -115,7 +115,7 @@ func (c *Consumer) ConsumeClaim(session sarama.ConsumerGroupSession, claim saram
 				}
 			case <-ticker.C:
 				if len(batch) > 0 {
-					if err := c.insertBatch(ctx, batch); err != nil {
+					if err := c.insertBatch(c.ctx, batch); err != nil {
 						logger.Error("Ошибка при вставке батча по таймеру: ", err)
 					}
 					batch = batch[:0]
