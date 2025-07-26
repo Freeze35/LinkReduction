@@ -69,8 +69,10 @@ func (s *Service) ShortenURL(ctx context.Context, originalURL string) (string, e
 		}
 		shortLink := generateShortLink(inputURL)
 
-		if _, err := s.repo.FindByShortLink(ctx, shortLink); err != nil {
+		if existing, err := s.repo.FindByShortLink(ctx, shortLink); err != nil {
 			return "", fmt.Errorf("ошибка проверки ключа: %v", err)
+		} else if existing == "" { // Ключ уникален
+			return shortLink, nil
 		}
 
 		if i == 2 {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/IBM/sarama"
 	"github.com/sirupsen/logrus"
+	configKafka "linkreduction/internal/config"
 	"linkreduction/internal/repository/postgres"
 	"linkreduction/internal/repository/redis"
 	"os"
@@ -57,7 +58,7 @@ func (c *Consumer) ConsumeShortenURLs() error {
 	var consumerGroup sarama.ConsumerGroup
 	var err error
 	for i := 0; i < 10; i++ {
-		consumerGroup, err = sarama.NewConsumerGroup(kafkaBrokers, "shorten-urls-group", config)
+		consumerGroup, err = sarama.NewConsumerGroup(kafkaBrokers, configKafka.KafkaShortenURLsGroup, config)
 		if err == nil {
 			break
 		}
@@ -69,7 +70,7 @@ func (c *Consumer) ConsumeShortenURLs() error {
 	defer consumerGroup.Close()
 
 	for {
-		err := consumerGroup.Consume(c.ctx, []string{"shorten-urls"}, c)
+		err := consumerGroup.Consume(c.ctx, []string{configKafka.KafkaShortenURLsTopic}, c)
 		if err != nil {
 			time.Sleep(5 * time.Second)
 		}

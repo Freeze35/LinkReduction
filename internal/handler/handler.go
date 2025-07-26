@@ -9,12 +9,12 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/adaptor"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sirupsen/logrus"
+	"linkreduction/internal/config"
 	"linkreduction/internal/prometheus"
 	"linkreduction/internal/service"
 	"net/http"
 	"os"
 	"strings"
-	"time"
 )
 
 // BaseURL - базовый домен для коротких ссылок
@@ -59,8 +59,6 @@ func (h *Handler) InitRoutes(app *fiber.App) {
 // createShortLink обрабатывает POST-запрос для создания короткой ссылки
 func (h *Handler) createShortLink(c *fiber.Ctx) error {
 
-	start := time.Now()
-
 	var originalURL string
 	if c.Get("Content-Type") == "application/json" {
 		var req ShortenRequest
@@ -96,7 +94,7 @@ func (h *Handler) createShortLink(c *fiber.Ctx) error {
 		}
 
 		h.metrics.CreateShortLinkTotal.WithLabelValues("error", errorType).Inc()
-		h.metrics.CreateShortLinkLatency.WithLabelValues("error", errorType).Observe(time.Since(start).Seconds())
+
 		return c.Status(http.StatusBadRequest).JSON(fiber.Map{
 			"error": err.Error(),
 		})
@@ -118,7 +116,7 @@ func (h *Handler) createShortLink(c *fiber.Ctx) error {
 		}
 
 		_, _, err = h.producer.SendMessage(&sarama.ProducerMessage{
-			Topic: "shorten-urls",
+			Topic: config.KafkaShortenURLsTopic,
 			Value: sarama.ByteEncoder(messageBytes),
 		})
 		if err != nil {
@@ -147,7 +145,7 @@ func (h *Handler) createShortLink(c *fiber.Ctx) error {
 	}
 
 	h.metrics.CreateShortLinkTotal.WithLabelValues("success", "none").Inc()
-	h.metrics.CreateShortLinkLatency.WithLabelValues("success", "none").Observe(time.Since(start).Seconds())
+
 	return c.Status(http.StatusCreated).JSON(fiber.Map{
 		"message":  "Короткая ссылка создана",
 		"shortURL": shortURL,
