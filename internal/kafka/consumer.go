@@ -9,6 +9,7 @@ import (
 	configKafka "linkreduction/internal/config"
 	"linkreduction/internal/repository/postgres"
 	"linkreduction/internal/repository/redis"
+	"linkreduction/internal/service"
 	"os"
 	"strings"
 	"sync"
@@ -23,16 +24,17 @@ type ShortenMessage struct {
 
 // Consumer - структура для обработки сообщений Kafka
 type Consumer struct {
-	producer sarama.SyncProducer
-	repo     postgres.LinkRepo
-	cache    redis.LinkCache
-	logger   *logrus.Logger
-	ctx      context.Context
+	producer    sarama.SyncProducer
+	repo        postgres.LinkRepo
+	cache       redis.LinkCache
+	logger      *logrus.Logger
+	ctx         context.Context
+	linkService *service.Service
 }
 
 // NewConsumer создаёт новый экземпляр Consumer
-func NewConsumer(producer sarama.SyncProducer, repo postgres.LinkRepo, cache redis.LinkCache, logger *logrus.Logger, ctx context.Context) *Consumer {
-	return &Consumer{producer: producer, repo: repo, cache: cache, logger: logger, ctx: ctx}
+func NewConsumer(producer sarama.SyncProducer, repo postgres.LinkRepo, cache redis.LinkCache, logger *logrus.Logger, ctx context.Context, linkService *service.Service) *Consumer {
+	return &Consumer{producer: producer, repo: repo, cache: cache, logger: logger, ctx: ctx, linkService: linkService}
 }
 
 // ConsumeShortenURLs обрабатывает сообщения из Kafka
@@ -83,11 +85,10 @@ func (c *Consumer) ConsumeClaim(session sarama.ConsumerGroupSession, claim saram
 
 	batchSize := 100                 // Максимальный размер батча
 	batchTimeout := 10 * time.Second // Максимальное время ожидания для батча
-	batch := make([]postgres.LinkURL, 0, batchSize)
+
 	batchChan := make(chan postgres.LinkURL, batchSize)
 
 	var wg sync.WaitGroup
-
 	// Горутина для пакетной вставки
 	wg.Add(1)
 	go func() {
@@ -95,12 +96,13 @@ func (c *Consumer) ConsumeClaim(session sarama.ConsumerGroupSession, claim saram
 		ticker := time.NewTicker(batchTimeout)
 		defer ticker.Stop()
 
+		batch := make([]postgres.LinkURL, 0, batchSize) // Явно выделяем срез с нужной ёмкостью
 		for {
 			select {
 			case msg, ok := <-batchChan:
-				if !ok {
+				if !ok { // Канал закрыт
 					if len(batch) > 0 {
-						if err := c.insertBatch(c.ctx, batch); err != nil {
+						if err := c.linkService.InsertBatch(c.ctx, batch); err != nil {
 							logger.Error("Ошибка при вставке последнего батча: ", err)
 						}
 					}
@@ -108,20 +110,21 @@ func (c *Consumer) ConsumeClaim(session sarama.ConsumerGroupSession, claim saram
 				}
 				batch = append(batch, msg)
 				if len(batch) >= batchSize {
-					if err := c.insertBatch(c.ctx, batch); err != nil {
+					if err := c.linkService.InsertBatch(c.ctx, batch); err != nil {
 						logger.Error("Ошибка при вставке батча: ", err)
 					}
-					batch = batch[:0]
-					ticker.Reset(batchTimeout)
+					batch = batch[:0]          // Очищаем батч
+					ticker.Reset(batchTimeout) // Сбрасываем таймер после вставки
 				}
 			case <-ticker.C:
-				if len(batch) > 0 {
-					if err := c.insertBatch(c.ctx, batch); err != nil {
+				if len(batch) > 0 { // Вставляем только если батч не пуст
+					if err := c.linkService.InsertBatch(c.ctx, batch); err != nil {
 						logger.Error("Ошибка при вставке батча по таймеру: ", err)
 					}
-					batch = batch[:0]
+					batch = batch[:0]          // Очищаем батч
+					ticker.Reset(batchTimeout) // Сбрасываем таймер после вставки
 				}
-				ticker.Reset(batchTimeout)
+				// Если батч пуст, не сбрасываем таймер — он продолжает отсчёт
 			}
 		}
 	}()
@@ -155,25 +158,5 @@ func (c *Consumer) Setup(sarama.ConsumerGroupSession) error {
 
 // Cleanup вызывается при завершении consumer group (после завершения потребления)
 func (c *Consumer) Cleanup(sarama.ConsumerGroupSession) error {
-	return nil
-}
-
-// insertBatch выполняет пакетную вставку в PostgreSQL
-func (c *Consumer) insertBatch(ctx context.Context, batch []postgres.LinkURL) error {
-	if len(batch) == 0 {
-		return fmt.Errorf("длина батча нулевая")
-	}
-
-	rowsAffected, err := c.repo.InsertBatch(ctx, batch)
-	if err != nil {
-		/*for range batch {// Здесь можно добавить метрику для ошибок, если нужно}*/
-		return fmt.Errorf("ошибка при внедрение батча %v", err)
-	}
-
-	for _, link := range batch[:rowsAffected] {
-		if err := c.cache.SetShortLink(ctx, link.OriginalURL, link.ShortLink, time.Minute*10); err != nil {
-			return fmt.Errorf("Ошибка записи в Redis (shorten): %v,%v", link.OriginalURL, err)
-		}
-	}
 	return nil
 }

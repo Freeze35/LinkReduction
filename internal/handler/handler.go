@@ -147,7 +147,6 @@ func (h *Handler) createShortLink(c *fiber.Ctx) error {
 	h.metrics.CreateShortLinkTotal.WithLabelValues("success", "none").Inc()
 
 	return c.Status(http.StatusCreated).JSON(fiber.Map{
-		"message":  "Короткая ссылка создана",
 		"shortURL": shortURL,
 	})
 }

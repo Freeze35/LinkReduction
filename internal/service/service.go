@@ -129,3 +129,23 @@ func generateShortLink(originalURL string) string {
 	hash := md5.Sum([]byte(originalURL))
 	return fmt.Sprintf("%x", hash)[:6]
 }
+
+// InsertBatch выполняет пакетную вставку в PostgreSQL
+func (s *Service) InsertBatch(ctx context.Context, batch []postgres.LinkURL) error {
+	if len(batch) == 0 {
+		return fmt.Errorf("длина батча нулевая")
+	}
+
+	rowsAffected, err := s.repo.InsertBatch(ctx, batch)
+	if err != nil {
+		/*for range batch {// Здесь можно добавить метрику для ошибок, если нужно}*/
+		return fmt.Errorf("ошибка при внедрение батча %v", err)
+	}
+
+	for _, link := range batch[:rowsAffected] {
+		if err := s.cache.SetShortLink(ctx, link.OriginalURL, link.ShortLink, time.Minute*10); err != nil {
+			return fmt.Errorf("ошибка записи в Redis (shorten): %v,%v", link.OriginalURL, err)
+		}
+	}
+	return nil
+}

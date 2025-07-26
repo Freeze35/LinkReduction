@@ -104,7 +104,7 @@ var shortenCmd = &cobra.Command{
 		// Инициализация сервисов
 		linkService := service.NewLinkService(linkRepo, cache)
 		cleanupService := cleanup.NewCleanupService(linkRepo, logger, ctx)
-		kafkaConsumer := kafka.NewConsumer(kafkaProducer, linkRepo, cache, logger, ctx)
+		kafkaConsumer := kafka.NewConsumer(kafkaProducer, linkRepo, cache, logger, ctx, linkService)
 
 		// Инициализация обработчика HTTP
 		h, err := handler.NewHandler(linkService, metrics, logger)
