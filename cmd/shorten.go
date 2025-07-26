@@ -58,9 +58,7 @@ var shortenCmd = &cobra.Command{
 		}
 
 		// Выполнение миграций
-		logger.WithField("component", "shorten").Info("Запуск миграций базы данных")
-		migrations.RunMigrations()
-		logger.WithField("component", "shorten").Info("Миграции успешно применены")
+		migrations.RunMigrations(logger)
 
 		// Инициализация зависимостей
 		dep := handler.NewDependency()
