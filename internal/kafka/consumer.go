@@ -24,16 +24,16 @@ type ShortenMessage struct {
 
 // Consumer - структура для обработки сообщений Kafka
 type Consumer struct {
+	ctx         context.Context
 	producer    sarama.SyncProducer
 	repo        postgres.LinkRepo
 	cache       redis.LinkCache
 	logger      *logrus.Logger
-	ctx         context.Context
 	linkService *service.Service
 }
 
 // NewConsumer создаёт новый экземпляр Consumer
-func NewConsumer(producer sarama.SyncProducer, repo postgres.LinkRepo, cache redis.LinkCache, logger *logrus.Logger, ctx context.Context, linkService *service.Service) *Consumer {
+func NewConsumer(ctx context.Context, producer sarama.SyncProducer, repo postgres.LinkRepo, cache redis.LinkCache, logger *logrus.Logger, linkService *service.Service) *Consumer {
 	return &Consumer{producer: producer, repo: repo, cache: cache, logger: logger, ctx: ctx, linkService: linkService}
 }
 

@@ -9,13 +9,13 @@ import (
 
 // CleanupService - сервис для очистки старых ссылок
 type CleanupService struct {
+	ctx    context.Context
 	repo   postgres.LinkRepo
 	logger *logrus.Logger
-	ctx    context.Context
 }
 
 // NewCleanupService создаёт новый экземпляр CleanupService
-func NewCleanupService(repo postgres.LinkRepo, logger *logrus.Logger, ctx context.Context) *CleanupService {
+func NewCleanupService(ctx context.Context, repo postgres.LinkRepo, logger *logrus.Logger) *CleanupService {
 	return &CleanupService{repo: repo, logger: logger, ctx: ctx}
 }
 
