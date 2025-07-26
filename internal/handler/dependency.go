@@ -12,19 +12,7 @@ import (
 	"time"
 )
 
-type DependencyI interface {
-	InitPostgres(logger *logrus.Logger) (*sql.DB, error)
-	RedisConnect(ctx context.Context, logger *logrus.Logger) (*redis.Client, error)
-	KafkaConnect(logger *logrus.Logger) (sarama.SyncProducer, error)
-}
-
-type Dependency struct{}
-
-func NewDependency() *Dependency {
-	return &Dependency{}
-}
-
-func (h *Dependency) InitPostgres(logger *logrus.Logger) (*sql.DB, error) {
+func InitPostgres(logger *logrus.Logger) (*sql.DB, error) {
 	dbURL := os.Getenv("DB_DSN_LINKSDB")
 	if dbURL == "" {
 		logger.Fatal("Переменная окружения DB_DSN_LINKSDB не задана")
@@ -33,12 +21,10 @@ func (h *Dependency) InitPostgres(logger *logrus.Logger) (*sql.DB, error) {
 	logger.WithField("db_url", dbURL).Info("Подключение к базе данных")
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
-		logger.WithField("error", err).Error("Ошибка открытия базы данных")
 		return nil, fmt.Errorf("ошибка открытия базы данных: %w", err)
 	}
 
 	if err := db.Ping(); err != nil {
-		logger.WithField("error", err).Error("База данных недоступна")
 		return nil, fmt.Errorf("база данных недоступна: %v", err)
 	}
 
@@ -46,7 +32,7 @@ func (h *Dependency) InitPostgres(logger *logrus.Logger) (*sql.DB, error) {
 	return db, nil
 }
 
-func (h *Dependency) RedisConnect(ctx context.Context, logger *logrus.Logger) (*redis.Client, error) {
+func RedisConnect(ctx context.Context, logger *logrus.Logger) (*redis.Client, error) {
 	redisURL := os.Getenv("REDIS_URL")
 	if redisURL == "" {
 		logger.Fatal("Переменная окружения REDIS_URL не задана")
@@ -56,7 +42,6 @@ func (h *Dependency) RedisConnect(ctx context.Context, logger *logrus.Logger) (*
 	redisClient := redis.NewClient(&redis.Options{Addr: redisURL})
 
 	if _, err := redisClient.Ping(ctx).Result(); err != nil {
-		logger.WithField("error", err).Error("Redis недоступен")
 		return nil, fmt.Errorf("Redis недоступен: %v", err)
 	}
 
@@ -64,36 +49,47 @@ func (h *Dependency) RedisConnect(ctx context.Context, logger *logrus.Logger) (*
 	return redisClient, nil
 }
 
-func (h *Dependency) KafkaConnect(logger *logrus.Logger) (sarama.SyncProducer, error) {
+// GetKafkaBrokers получает список Kafka брокеров из переменной окружения KAFKA_BROKERS.
+// Возвращает срез строк с адресами брокеров или ошибку, если переменная не задана или содержит недопустимые значения.
+func GetKafkaBrokers(logger *logrus.Logger) ([]string, error) {
 	kafkaEnv := os.Getenv("KAFKA_BROKERS")
-	kafkaBrokers := strings.Split(kafkaEnv, ",")
-
-	logger.WithField("kafka_brokers", kafkaEnv).Info("Проверка переменной окружения KAFKA_BROKERS")
-	if len(kafkaBrokers) == 0 || kafkaBrokers[0] == "" {
-		logger.Info("Переменная окружения KAFKA_BROKERS пуста или не задана, Kafka будет отключена")
-		return nil, nil
+	if kafkaEnv == "" {
+		return nil, fmt.Errorf("KAFKA_BROKERS не задана")
 	}
-
-	for _, broker := range kafkaBrokers {
-		if strings.TrimSpace(broker) == "" {
-			logger.Info("Обнаружен пустой адрес брокера Kafka, Kafka будет отключена")
-			return nil, nil
+	brokers := strings.Split(kafkaEnv, ",")
+	cleaned := make([]string, 0, len(brokers))
+	for _, b := range brokers {
+		trimmed := strings.TrimSpace(b)
+		if trimmed != "" {
+			cleaned = append(cleaned, trimmed)
 		}
 	}
+	if len(cleaned) == 0 {
+		return nil, fmt.Errorf("KAFKA_BROKERS не содержит валидных брокеров")
+	}
+	logger.WithField("brokers", cleaned).Info("Получены адреса брокеров Kafka")
+	return cleaned, nil
+}
 
-	logger.WithField("kafka_brokers", kafkaBrokers).Info("Подключение к Kafka")
-	config := sarama.NewConfig()
-	config.Producer.Return.Successes = true
-	config.Producer.RequiredAcks = sarama.WaitForAll
-	config.Producer.Retry.Max = 5
-	config.Producer.Retry.Backoff = 100 * time.Millisecond
+// NewKafkaProducerConfig создаёт и настраивает конфигурацию для Kafka продюсера.
+// Устанавливаются параметры подтверждения, количество попыток и задержка между ними.
+func NewKafkaProducerConfig() *sarama.Config {
+	cfg := sarama.NewConfig()
+	cfg.Producer.Return.Successes = true
+	cfg.Producer.RequiredAcks = sarama.WaitForAll
+	cfg.Producer.Retry.Max = 5
+	cfg.Producer.Retry.Backoff = 100 * time.Millisecond
+	return cfg
+}
 
-	var producer sarama.SyncProducer
-	var err error
+// ConnectKafkaProducer пытается подключиться к Kafka брокерам с помощью переданной конфигурации.
+// Делает до 10 попыток с задержкой в 2 секунды между ними. Возвращает SyncProducer или ошибку.
+func ConnectKafkaProducer(brokers []string, cfg *sarama.Config, logger *logrus.Logger) (sarama.SyncProducer, error) {
 	for i := 0; i < 10; i++ {
-		producer, err = sarama.NewSyncProducer(kafkaBrokers, config)
+		producer, err := sarama.NewSyncProducer(brokers, cfg)
 		if err == nil {
-			break
+			logger.Info("Kafka продюсер успешно подключён")
+			return producer, nil
 		}
 		logger.WithFields(logrus.Fields{
 			"attempt": i + 1,
@@ -101,12 +97,27 @@ func (h *Dependency) KafkaConnect(logger *logrus.Logger) (sarama.SyncProducer, e
 		}).Error("Ошибка подключения к Kafka")
 		time.Sleep(2 * time.Second)
 	}
+	return nil, fmt.Errorf("не удалось подключиться к Kafka после 10 попыток")
+}
 
+// InitKafkaProducer объединяет шаги инициализации Kafka продюсера:
+// получает брокеров, создаёт конфигурацию и устанавливает соединение.
+// Возвращает подключённый SyncProducer или ошибку.
+func InitKafkaProducer(logger *logrus.Logger) (sarama.SyncProducer, error) {
+	// Получаем список брокеров из переменной окружения
+	brokers, err := GetKafkaBrokers(logger)
 	if err != nil {
-		logger.WithField("error", err).Warn("Ошибка подключения к Kafka после 10 попыток, Kafka будет отключена")
-		return nil, nil
+		return nil, err
 	}
 
-	logger.Info("Kafka успешно подключён")
+	// Создаём конфигурацию для Kafka-продюсера
+	config := NewKafkaProducerConfig()
+
+	// Подключаемся к Kafka
+	producer, err := ConnectKafkaProducer(brokers, config, logger)
+	if err != nil {
+		return nil, err
+	}
+
 	return producer, nil
 }

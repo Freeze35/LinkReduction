@@ -4,27 +4,26 @@ import (
 	"context"
 	"crypto/md5"
 	"fmt"
-	"github.com/sirupsen/logrus"
-	"linkreduction/internal/repository"
+	"linkreduction/internal/repository/postgres"
+	"linkreduction/internal/repository/redis"
 	"net/url"
 	"strings"
 )
 
-// LinkService - сервис для работы с сокращением ссылок
-type LinkService struct {
-	repo   repository.LinkRepository
-	cache  repository.Cache
-	logger *logrus.Logger
+// Service - сервис для работы с сокращением ссылок
+type Service struct {
+	repo  postgres.LinkRepo
+	cache redis.LinkCache
 }
 
-// NewLinkService создаёт новый экземпляр LinkService
-func NewLinkService(repo repository.LinkRepository, cache repository.Cache, logger *logrus.Logger) *LinkService {
-	return &LinkService{repo: repo, cache: cache, logger: logger}
+// NewLinkService создаёт новый экземпляр Service
+func NewLinkService(repo postgres.LinkRepo, cache redis.LinkCache) *Service {
+	return &Service{repo: repo, cache: cache}
 }
 
 // ShortenURL проверяет URL, ищет в кэше/БД или генерирует новый ключ
-func (s *LinkService) ShortenURL(ctx context.Context, originalURL string) (string, error) {
-	logger := s.logger.WithField("component", "service")
+func (s *Service) ShortenURL(ctx context.Context, originalURL string) (string, error) {
+
 	if !strings.HasPrefix(originalURL, "http://") && !strings.HasPrefix(originalURL, "https://") {
 		return "", fmt.Errorf("некорректный URL: должен начинаться с http:// или https://")
 	}
@@ -37,23 +36,17 @@ func (s *LinkService) ShortenURL(ctx context.Context, originalURL string) (strin
 	if cachedShortLink, err := s.cache.GetShortLink(ctx, originalURL); err != nil {
 		return "", fmt.Errorf("ошибка чтения из кэша: %v", err)
 	} else if cachedShortLink != "" {
-		logger.WithFields(logrus.Fields{
-			"original_url": originalURL,
-			"short_link":   cachedShortLink,
-		}).Info("Найдено в кэше (shorten)")
 		return cachedShortLink, nil
 	}
 
 	// Проверка в БД
-	if shortLink, err := s.repo.FindByOriginalURL(ctx, originalURL); err != nil {
-		return "", fmt.Errorf("ошибка проверки URL в базе данных: %v", err)
-	} else if shortLink != "" {
+	shortLink, err := s.repo.FindByOriginalURL(ctx, originalURL)
+	if err != nil {
+		return "", fmt.Errorf("ошибка проверки URL в базе данных: %w", err)
+	}
+	if shortLink != "" {
 		if err := s.cache.SetShortLink(ctx, originalURL, shortLink, 10*60); err != nil {
-			logger.WithFields(logrus.Fields{
-				"original_url": originalURL,
-				"short_link":   shortLink,
-				"error":        err,
-			}).Error("Ошибка записи в кэш")
+			return "", fmt.Errorf("ошибка записи в кэш: %w", err)
 		}
 		return shortLink, nil
 	}
@@ -79,35 +72,25 @@ func (s *LinkService) ShortenURL(ctx context.Context, originalURL string) (strin
 }
 
 // InsertLink вставляет новую ссылку в хранилище
-func (s *LinkService) InsertLink(ctx context.Context, originalURL, shortLink string) (bool, error) {
+func (s *Service) InsertLink(ctx context.Context, originalURL, shortLink string) (bool, error) {
 	ok, err := s.repo.Insert(ctx, originalURL, shortLink)
 	if err != nil {
 		return false, err
 	}
 	if ok {
 		if err := s.cache.SetShortLink(ctx, originalURL, shortLink, 10*60); err != nil {
-			s.logger.WithFields(logrus.Fields{
-				"component":    "service",
-				"original_url": originalURL,
-				"short_link":   shortLink,
-				"error":        err,
-			}).Error("Ошибка записи в кэш")
+			return false, fmt.Errorf("не удалось вставляет новую ссылку: %v", err)
 		}
 	}
 	return ok, nil
 }
 
 // GetOriginalURL получает оригинальный URL по короткой ссылке
-func (s *LinkService) GetOriginalURL(ctx context.Context, shortLink string) (string, error) {
+func (s *Service) GetOriginalURL(ctx context.Context, shortLink string) (string, error) {
 	// Проверка в кэше
 	if cachedURL, err := s.cache.GetOriginalURL(ctx, shortLink); err != nil {
 		return "", fmt.Errorf("ошибка чтения из кэша: %v", err)
 	} else if cachedURL != "" {
-		s.logger.WithFields(logrus.Fields{
-			"component":  "service",
-			"short_link": shortLink,
-			"cached_url": cachedURL,
-		}).Info("Найдено в кэше (redirect)")
 		return cachedURL, nil
 	}
 
@@ -122,12 +105,7 @@ func (s *LinkService) GetOriginalURL(ctx context.Context, shortLink string) (str
 
 	// Кэширование результата
 	if err := s.cache.SetOriginalURL(ctx, shortLink, originalURL, 10*60); err != nil {
-		s.logger.WithFields(logrus.Fields{
-			"component":    "service",
-			"short_link":   shortLink,
-			"original_url": originalURL,
-			"error":        err,
-		}).Error("Ошибка записи в кэш")
+		return "", fmt.Errorf("ошибка записи в кэш: %v", err)
 	}
 
 	return originalURL, nil

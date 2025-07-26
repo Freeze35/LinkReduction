@@ -3,18 +3,18 @@ package cleanup
 import (
 	"context"
 	"github.com/sirupsen/logrus"
-	"linkreduction/internal/repository"
+	"linkreduction/internal/repository/postgres"
 	"time"
 )
 
 // CleanupService - сервис для очистки старых ссылок
 type CleanupService struct {
-	repo   repository.LinkRepository
+	repo   postgres.LinkRepo
 	logger *logrus.Logger
 }
 
 // NewCleanupService создаёт новый экземпляр CleanupService
-func NewCleanupService(repo repository.LinkRepository, logger *logrus.Logger) *CleanupService {
+func NewCleanupService(repo postgres.LinkRepo, logger *logrus.Logger) *CleanupService {
 	return &CleanupService{repo: repo, logger: logger}
 }
 

@@ -3,6 +3,9 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"linkreduction/internal/repository/postgres"
+	"linkreduction/internal/repository/redis"
+	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -16,7 +19,6 @@ import (
 	"linkreduction/internal/handler"
 	"linkreduction/internal/kafka"
 	"linkreduction/internal/prometheus"
-	"linkreduction/internal/repository"
 	"linkreduction/internal/service"
 	"linkreduction/migrations"
 )
@@ -60,58 +62,34 @@ var shortenCmd = &cobra.Command{
 		// Выполнение миграций
 		migrations.RunMigrations(logger)
 
-		// Инициализация зависимостей
-		dep := handler.NewDependency()
-
-		// Инициализация подключения к PostgreSQL
-		db, err := dep.InitPostgres(logger)
+		db, err := handler.InitPostgres(logger)
 		if err != nil {
-			logger.WithFields(logrus.Fields{
-				"component": "shorten",
-				"error":     err,
-			}).Fatal("Ошибка инициализации базы данных")
+			logger.Fatal("Ошибка инициализации базы данных")
 		}
 		defer func() {
 			if err := db.Close(); err != nil {
-				logger.WithFields(logrus.Fields{
-					"component": "shorten",
-					"error":     err,
-				}).Error("Ошибка при закрытии базы данных")
+				logger.Fatal("Ошибка при закрытии базы данных")
 			}
 		}()
 
-		// Инициализация подключения к Redis
-		redisClient, err := dep.RedisConnect(ctx, logger)
+		redisClient, err := handler.RedisConnect(ctx, logger)
 		if err != nil {
-			logger.WithFields(logrus.Fields{
-				"component": "shorten",
-				"error":     err,
-			}).Fatal("Ошибка инициализации Redis")
+			logger.Fatal("Ошибка инициализации Redis")
 		}
 		defer func() {
 			if err := redisClient.Close(); err != nil {
-				logger.WithFields(logrus.Fields{
-					"component": "shorten",
-					"error":     err,
-				}).Error("Ошибка при закрытии Redis соединения")
+				logger.Fatal("Ошибка при закрытии Redis соединения")
 			}
 		}()
 
-		// Инициализация подключения к Kafka
-		kafkaProducer, err := dep.KafkaConnect(logger)
+		kafkaProducer, err := handler.InitKafkaProducer(logger)
 		if err != nil {
-			logger.WithFields(logrus.Fields{
-				"component": "shorten",
-				"error":     err,
-			}).Fatal("Ошибка инициализации Kafka")
+			logger.Fatal("Ошибка инициализации Kafka")
 		}
 		if kafkaProducer != nil {
 			defer func() {
 				if err := kafkaProducer.Close(); err != nil {
-					logger.WithFields(logrus.Fields{
-						"component": "shorten",
-						"error":     err,
-					}).Error("Ошибка при закрытии Kafka соединения")
+					logger.Fatal("Ошибка при закрытии Kafka соединения")
 				}
 			}()
 		}
@@ -120,21 +98,18 @@ var shortenCmd = &cobra.Command{
 		metrics := initprometheus.InitPrometheus()
 
 		// Инициализация репозиториев
-		linkRepo := repository.NewPostgresLinkRepository(db, logger)
-		cache := repository.NewRedisCache(redisClient, logger)
+		linkRepo := postgres.NewPostgresLinkRepository(db)
+		cache := redis.NewLink(redisClient, logger)
 
 		// Инициализация сервисов
-		linkService := service.NewLinkService(linkRepo, cache, logger)
+		linkService := service.NewLinkService(linkRepo, cache)
 		cleanupService := cleanup.NewCleanupService(linkRepo, logger)
 		kafkaConsumer := kafka.NewConsumer(kafkaProducer, linkRepo, cache, logger)
 
 		// Инициализация обработчика HTTP
 		h, err := handler.NewHandler(linkService, metrics, logger)
 		if err != nil {
-			logger.WithFields(logrus.Fields{
-				"component": "shorten",
-				"error":     err,
-			}).Fatal("Ошибка инициализации обработчика")
+			logger.Fatal("Ошибка инициализации обработчика")
 		}
 
 		// Настройка Fiber
@@ -143,10 +118,26 @@ var shortenCmd = &cobra.Command{
 		// Инициализация маршрутов
 		h.InitRoutes(app)
 
-		// Запуск Kafka consumer, если Kafka доступна
+		//канал для обработки кафки
+		errChan := make(chan error, 1)
+
 		if kafkaConsumer != nil {
-			go kafkaConsumer.ConsumeShortenURLs()
+			go func() {
+				errChan <- kafkaConsumer.ConsumeShortenURLs()
+			}()
 		}
+
+		// где-то в другом месте (например, select или отдельная горутина):
+		go func() {
+			select {
+			case err := <-errChan:
+				if err != nil {
+					log.Printf("Kafka consumer завершился с ошибкой: %v", err)
+					// Можно попытаться перезапустить consumer или завершить процесс
+					// С учётом того что kafka может отсутствовать. Это возможно проигнорировать
+				}
+			}
+		}()
 
 		// Запуск очистки старых ссылок
 		go cleanupService.CleanupOldLinks()

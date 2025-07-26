@@ -22,7 +22,7 @@ var BaseURL = os.Getenv("BASE_URL")
 
 // Handler - структура для обработки HTTP-запросов
 type Handler struct {
-	service  *service.LinkService
+	service  *service.Service
 	metrics  *initprometheus.PrometheusMetrics
 	logger   *logrus.Logger
 	producer sarama.SyncProducer
@@ -40,7 +40,7 @@ type ShortenMessage struct {
 }
 
 // NewHandler создаёт новый экземпляр Handler
-func NewHandler(service *service.LinkService, metrics *initprometheus.PrometheusMetrics, logger *logrus.Logger) (*Handler, error) {
+func NewHandler(service *service.Service, metrics *initprometheus.PrometheusMetrics, logger *logrus.Logger) (*Handler, error) {
 	if service == nil {
 		return nil, fmt.Errorf("link service must not be nil")
 	}
