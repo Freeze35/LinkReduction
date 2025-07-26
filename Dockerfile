@@ -11,7 +11,7 @@ RUN go mod download
 COPY . .
 
 # Собираем бинарник из cmd/main.go с именем linkreduction
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o linkreduction ./cmd
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o linkreduction ./main.go
 
 # Этап рантайма — легковесный образ
 FROM debian:bullseye-slim
@@ -21,14 +21,17 @@ WORKDIR /app
 # Копируем бинарник
 COPY --from=builder /app/linkreduction .
 
-# Копируем .env если нужен
-COPY .env .env
+# Копируем .env
+COPY .env .
 
 # Копирование миграций
 COPY ./migrations ./migrations
 
-# Открываем порт (замени на нужный, например 8080)
+# Устанавливаем права на выполнение
+RUN chmod +x ./linkreduction
+
+# Открываем порт
 EXPOSE 8080
 
 # Запускаем приложение
-CMD ["./linkreduction"]
+CMD ["./linkreduction", "shorten", "--file", "/app/.env"]

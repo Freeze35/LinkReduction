@@ -8,7 +8,7 @@ type PrometheusMetrics struct {
 	DbInsertTotal          *prometheus.CounterVec
 	RedirectTotal          *prometheus.CounterVec
 	CreateShortLinkLatency *prometheus.HistogramVec
-	CleanupTotal           *prometheus.CounterVec // Новая метрика для удалений
+	CleanupTotal           *prometheus.CounterVec
 }
 
 // InitPrometheus инициализирует метрики Prometheus
@@ -19,21 +19,21 @@ func InitPrometheus() *PrometheusMetrics {
 				Name: "shortener_create_short_link_total",
 				Help: "Total number of short link creation requests",
 			},
-			[]string{"status"},
+			[]string{"status", "reason"},
 		),
 		DbInsertTotal: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
 				Name: "shortener_db_insert_total",
 				Help: "Total number of database insert operations",
 			},
-			[]string{"status"},
+			[]string{"status", "reason"},
 		),
 		RedirectTotal: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
 				Name: "shortener_redirect_total",
 				Help: "Total number of redirect requests",
 			},
-			[]string{"status"},
+			[]string{"status", "reason"},
 		),
 		CreateShortLinkLatency: prometheus.NewHistogramVec(
 			prometheus.HistogramOpts{
@@ -41,18 +41,18 @@ func InitPrometheus() *PrometheusMetrics {
 				Help:    "Latency of short link creation requests in seconds",
 				Buckets: prometheus.DefBuckets,
 			},
-			[]string{"status"},
+			[]string{"status", "reason"},
 		),
 		CleanupTotal: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
 				Name: "shortener_cleanup_total",
 				Help: "Total number of old links removed from the database",
 			},
-			[]string{"status"},
+			[]string{"status", "reason"},
 		),
 	}
 
-	// Регистрация метрик в Prometheus
+	// Регистрация метрик
 	prometheus.MustRegister(metrics.CreateShortLinkTotal)
 	prometheus.MustRegister(metrics.DbInsertTotal)
 	prometheus.MustRegister(metrics.RedirectTotal)
