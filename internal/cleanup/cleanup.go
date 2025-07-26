@@ -21,7 +21,7 @@ func NewCleanupService(repo postgres.LinkRepo, logger *logrus.Logger, ctx contex
 
 // CleanupOldLinks периодически удаляет записи старше 2 недель
 func (s *CleanupService) CleanupOldLinks() {
-	logger := s.logger.WithField("component", "cleanup")
+
 	ticker := time.NewTicker(2 * time.Hour)
 	defer ticker.Stop()
 
@@ -30,11 +30,11 @@ func (s *CleanupService) CleanupOldLinks() {
 		case <-ticker.C:
 			rowsAffected, err := s.repo.DeleteOldLinks(s.ctx, "2 weeks")
 			if err != nil {
-				logger.WithField("error", err).Error("Ошибка удаления старых записей")
+				s.logger.WithField("error", err).Error("Ошибка удаления старых записей")
 				continue
 			}
 			if rowsAffected > 0 {
-				logger.WithField("rows_affected", rowsAffected).Info("Удалено старых записей из БД")
+				s.logger.WithField("rows_affected", rowsAffected).Info("Удалено старых записей из БД")
 			}
 		}
 	}

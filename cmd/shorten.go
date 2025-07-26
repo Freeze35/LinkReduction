@@ -62,7 +62,7 @@ var shortenCmd = &cobra.Command{
 		// Выполнение миграций
 		migrations.RunMigrations(logger)
 
-		db, err := handler.InitPostgres(logger)
+		db, err := handler.InitPostgres()
 		if err != nil {
 			logger.Fatal("Ошибка инициализации базы данных")
 		}
@@ -72,7 +72,7 @@ var shortenCmd = &cobra.Command{
 			}
 		}()
 
-		redisClient, err := handler.RedisConnect(ctx, logger)
+		redisClient, err := handler.RedisConnect(ctx)
 		if err != nil {
 			logger.Fatal("Ошибка инициализации Redis")
 		}
@@ -82,7 +82,7 @@ var shortenCmd = &cobra.Command{
 			}
 		}()
 
-		kafkaProducer, err := handler.InitKafkaProducer(logger)
+		kafkaProducer, err := handler.InitKafkaProducer()
 		if err != nil {
 			logger.Fatal("Ошибка инициализации Kafka")
 		}

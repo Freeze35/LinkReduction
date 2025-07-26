@@ -8,6 +8,7 @@ import (
 	"linkreduction/internal/repository/redis"
 	"net/url"
 	"strings"
+	"time"
 )
 
 // Service - сервис для работы с сокращением ссылок
@@ -21,18 +22,27 @@ func NewLinkService(repo postgres.LinkRepo, cache redis.LinkCache) *Service {
 	return &Service{repo: repo, cache: cache}
 }
 
-// ShortenURL проверяет URL, ищет в кэше/БД или генерирует новый ключ
-func (s *Service) ShortenURL(ctx context.Context, originalURL string) (string, error) {
-
+// validateURL проверяет, является ли URL корректным
+func validateURL(originalURL string) error {
 	if !strings.HasPrefix(originalURL, "http://") && !strings.HasPrefix(originalURL, "https://") {
-		return "", fmt.Errorf("некорректный URL: должен начинаться с http:// или https://")
+		return fmt.Errorf("некорректный URL: должен начинаться с http:// или https://")
 	}
 	parsedURL, err := url.Parse(originalURL)
 	if err != nil || parsedURL.Scheme == "" || parsedURL.Host == "" {
-		return "", fmt.Errorf("некорректный формат URL")
+		return fmt.Errorf("некорректный формат URL")
+	}
+	return nil
+}
+
+// ShortenURL проверяет URL, ищет в кэше/БД или генерирует новый ключ
+func (s *Service) ShortenURL(ctx context.Context, originalURL string) (string, error) {
+	// Валидация URL
+	if err := validateURL(originalURL); err != nil {
+		return "", err
 	}
 
 	// Проверка в кэше
+
 	if cachedShortLink, err := s.cache.GetShortLink(ctx, originalURL); err != nil {
 		return "", fmt.Errorf("ошибка чтения из кэша: %v", err)
 	} else if cachedShortLink != "" {
@@ -45,7 +55,7 @@ func (s *Service) ShortenURL(ctx context.Context, originalURL string) (string, e
 		return "", fmt.Errorf("ошибка проверки URL в базе данных: %w", err)
 	}
 	if shortLink != "" {
-		if err := s.cache.SetShortLink(ctx, originalURL, shortLink, 10*60); err != nil {
+		if err := s.cache.SetShortLink(ctx, originalURL, shortLink, time.Minute*10); err != nil {
 			return "", fmt.Errorf("ошибка записи в кэш: %w", err)
 		}
 		return shortLink, nil
@@ -58,16 +68,17 @@ func (s *Service) ShortenURL(ctx context.Context, originalURL string) (string, e
 			inputURL = fmt.Sprintf("%s_%d", originalURL, i)
 		}
 		shortLink := generateShortLink(inputURL)
-		if exists, err := s.repo.FindByShortLink(ctx, shortLink); err != nil {
+
+		if _, err := s.repo.FindByShortLink(ctx, shortLink); err != nil {
 			return "", fmt.Errorf("ошибка проверки ключа: %v", err)
-		} else if exists == "" {
-			return shortLink, nil
 		}
+
 		if i == 2 {
 			return "", fmt.Errorf("не удалось сгенерировать уникальный ключ после %d попыток", i+1)
 		}
 	}
 
+	// Недостижимый код (оставлен для совместимости, но можно удалить)
 	return "", fmt.Errorf("не удалось сгенерировать короткую ссылку")
 }
 
@@ -78,7 +89,7 @@ func (s *Service) InsertLink(ctx context.Context, originalURL, shortLink string)
 		return false, err
 	}
 	if ok {
-		if err := s.cache.SetShortLink(ctx, originalURL, shortLink, 10*60); err != nil {
+		if err := s.cache.SetShortLink(ctx, originalURL, shortLink, time.Minute*10); err != nil {
 			return false, fmt.Errorf("не удалось вставляет новую ссылку: %v", err)
 		}
 	}

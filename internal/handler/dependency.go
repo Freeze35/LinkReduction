@@ -6,19 +6,17 @@ import (
 	"fmt"
 	"github.com/IBM/sarama"
 	"github.com/redis/go-redis/v9"
-	"github.com/sirupsen/logrus"
 	"os"
 	"strings"
 	"time"
 )
 
-func InitPostgres(logger *logrus.Logger) (*sql.DB, error) {
+func InitPostgres() (*sql.DB, error) {
 	dbURL := os.Getenv("DB_DSN_LINKSDB")
 	if dbURL == "" {
-		logger.Fatal("Переменная окружения DB_DSN_LINKSDB не задана")
+		return nil, fmt.Errorf("переменная окружения DB_DSN_LINKSDB не задана")
 	}
 
-	logger.WithField("db_url", dbURL).Info("Подключение к базе данных")
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
 		return nil, fmt.Errorf("ошибка открытия базы данных: %w", err)
@@ -28,30 +26,27 @@ func InitPostgres(logger *logrus.Logger) (*sql.DB, error) {
 		return nil, fmt.Errorf("база данных недоступна: %v", err)
 	}
 
-	logger.WithField("db_url", dbURL).Info("База данных успешно подключена")
 	return db, nil
 }
 
-func RedisConnect(ctx context.Context, logger *logrus.Logger) (*redis.Client, error) {
+func RedisConnect(ctx context.Context) (*redis.Client, error) {
 	redisURL := os.Getenv("REDIS_URL")
 	if redisURL == "" {
-		logger.Fatal("Переменная окружения REDIS_URL не задана")
+		return nil, fmt.Errorf("переменная окружения REDIS_URL не задана")
 	}
 
-	logger.WithField("redis_url", redisURL).Info("Подключение к Redis")
 	redisClient := redis.NewClient(&redis.Options{Addr: redisURL})
 
 	if _, err := redisClient.Ping(ctx).Result(); err != nil {
 		return nil, fmt.Errorf("Redis недоступен: %v", err)
 	}
 
-	logger.Info("Redis успешно подключён")
 	return redisClient, nil
 }
 
 // GetKafkaBrokers получает список Kafka брокеров из переменной окружения KAFKA_BROKERS.
 // Возвращает срез строк с адресами брокеров или ошибку, если переменная не задана или содержит недопустимые значения.
-func GetKafkaBrokers(logger *logrus.Logger) ([]string, error) {
+func GetKafkaBrokers() ([]string, error) {
 	kafkaEnv := os.Getenv("KAFKA_BROKERS")
 	if kafkaEnv == "" {
 		return nil, fmt.Errorf("KAFKA_BROKERS не задана")
@@ -67,7 +62,7 @@ func GetKafkaBrokers(logger *logrus.Logger) ([]string, error) {
 	if len(cleaned) == 0 {
 		return nil, fmt.Errorf("KAFKA_BROKERS не содержит валидных брокеров")
 	}
-	logger.WithField("brokers", cleaned).Info("Получены адреса брокеров Kafka")
+
 	return cleaned, nil
 }
 
@@ -84,17 +79,14 @@ func NewKafkaProducerConfig() *sarama.Config {
 
 // ConnectKafkaProducer пытается подключиться к Kafka брокерам с помощью переданной конфигурации.
 // Делает до 10 попыток с задержкой в 2 секунды между ними. Возвращает SyncProducer или ошибку.
-func ConnectKafkaProducer(brokers []string, cfg *sarama.Config, logger *logrus.Logger) (sarama.SyncProducer, error) {
+func ConnectKafkaProducer(brokers []string, cfg *sarama.Config) (sarama.SyncProducer, error) {
 	for i := 0; i < 10; i++ {
 		producer, err := sarama.NewSyncProducer(brokers, cfg)
 		if err == nil {
-			logger.Info("Kafka продюсер успешно подключён")
+
 			return producer, nil
 		}
-		logger.WithFields(logrus.Fields{
-			"attempt": i + 1,
-			"error":   err,
-		}).Error("Ошибка подключения к Kafka")
+
 		time.Sleep(2 * time.Second)
 	}
 	return nil, fmt.Errorf("не удалось подключиться к Kafka после 10 попыток")
@@ -103,9 +95,9 @@ func ConnectKafkaProducer(brokers []string, cfg *sarama.Config, logger *logrus.L
 // InitKafkaProducer объединяет шаги инициализации Kafka продюсера:
 // получает брокеров, создаёт конфигурацию и устанавливает соединение.
 // Возвращает подключённый SyncProducer или ошибку.
-func InitKafkaProducer(logger *logrus.Logger) (sarama.SyncProducer, error) {
+func InitKafkaProducer() (sarama.SyncProducer, error) {
 	// Получаем список брокеров из переменной окружения
-	brokers, err := GetKafkaBrokers(logger)
+	brokers, err := GetKafkaBrokers()
 	if err != nil {
 		return nil, err
 	}
@@ -114,7 +106,7 @@ func InitKafkaProducer(logger *logrus.Logger) (sarama.SyncProducer, error) {
 	config := NewKafkaProducerConfig()
 
 	// Подключаемся к Kafka
-	producer, err := ConnectKafkaProducer(brokers, config, logger)
+	producer, err := ConnectKafkaProducer(brokers, config)
 	if err != nil {
 		return nil, err
 	}

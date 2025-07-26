@@ -170,7 +170,7 @@ func (c *Consumer) insertBatch(ctx context.Context, batch []postgres.LinkURL) er
 	}
 
 	for _, link := range batch[:rowsAffected] {
-		if err := c.cache.SetShortLink(ctx, link.OriginalURL, link.ShortLink, 10*60); err != nil {
+		if err := c.cache.SetShortLink(ctx, link.OriginalURL, link.ShortLink, time.Minute*10); err != nil {
 			return fmt.Errorf("Ошибка записи в Redis (shorten): %v,%v", link.OriginalURL, err)
 		}
 	}
